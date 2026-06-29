@@ -91,6 +91,25 @@ The test covers ISO 8601 parses (fractional `Z`, date-only, offsets), date math
 double representations, the throwing error paths, and the validity predicates. It
 prints `all datetime tests passed` and exits 0.
 
+## Examples
+
+[`examples/demo.cc`](examples/demo.cc) is a runnable tour. A top-level CMake build
+produces it next to the test:
+
+```sh
+cmake -B build && cmake --build build && ./build/datetime_demo
+```
+
+It walks the parse -> structured value -> format thread through every vocabulary:
+ISO 8601 strings (date-only, full timestamp, fractional `Z`, and a `+05:30` offset
+stored as the UTC instant); the Elasticsearch-style date math after `||`, including
+`+1M-1d` shifts and the `/M` (round up to end-of-unit) vs `//M` (round down to
+start) distinction, leap-aware so `2020-02-10||/M` lands on Feb 29 while the 2021
+one lands on Feb 28; the `timestamp()` <-> `to_tm_t()` round-trip and the three
+`iso8601()` knobs (value, `trim`, separator); `TimeParser` and `TimedeltaParser`
+round-tripped through their double (seconds) representation; and the `is*`
+predicates plus a couple of `DatetimeError` throws caught as `std::runtime_error`.
+
 ## Provenance
 
 Extracted from [Xapiand](https://github.com/Kronuz/Xapiand). The standalone delta

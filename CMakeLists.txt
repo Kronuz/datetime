@@ -42,4 +42,8 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(datetime_test test/test.cc)
   target_link_libraries(datetime_test PRIVATE datetime)
   add_test(NAME datetime COMMAND datetime_test)
+
+  # A runnable tour of the library (not a test): build & run ./build/datetime_demo
+  add_executable(datetime_demo examples/demo.cc)
+  target_link_libraries(datetime_demo PRIVATE datetime)
 endif()

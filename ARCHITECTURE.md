@@ -1,7 +1,6 @@
 # ARCHITECTURE
 
-The internal design of the `datetime` library and the decoupling delta from
-Xapiand.
+The internal design of the `datetime` library.
 
 ## What this library is
 

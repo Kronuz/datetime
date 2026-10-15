@@ -1,5 +1,7 @@
 # datetime
 
+[![CI](https://github.com/Kronuz/datetime/actions/workflows/ci.yml/badge.svg)](https://github.com/Kronuz/datetime/actions/workflows/ci.yml)
+
 A small C++20 **date/time parser and formatter** extracted from
 [Xapiand](https://github.com/Kronuz/Xapiand). It parses ISO 8601 timestamps,
 Elasticsearch-style date math (`||+1M-1d/d`), standalone times and time deltas,

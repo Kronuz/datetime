@@ -1,0 +1,25 @@
+# datetime: ISO 8601, date math, times, and deltas in; structured values and ISO 8601 out.
+# Render: d2 --layout elk --sketch --theme 302 docs/datetime.d2 docs/datetime.svg
+direction: right
+
+in: strings {
+  iso: "\"2021-03-14T15:09:26.5Z\""
+  math: "\"2021-02-10||+1M-1d/d\""
+  time: "\"15:09:26.5\""
+  delta: "\"+01:30:00\""
+}
+tm: "tm_t" {
+  label: "tm_t\n(date and time)"
+}
+clk: "clk_t" {
+  label: "clk_t\n(time or delta)"
+}
+out: out {
+  label: "timestamp() · iso8601()\ntime_to_string()"
+}
+in.iso -> tm: "DatetimeParser"
+in.math -> tm
+in.time -> clk: "TimeParser"
+in.delta -> clk: "TimedeltaParser"
+tm -> out
+clk -> out

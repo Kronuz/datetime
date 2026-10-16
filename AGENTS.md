@@ -12,7 +12,9 @@ datetime.cc                  The pure-core implementation: ISO 8601 + date-math 
 test/test.cc                 Runnable smoke test: ISO parses, date math, timestamp round-trip, time/timedelta, throwing paths, predicates.
 CMakeLists.txt               STATIC library `datetime` (+ alias datetime::datetime); FetchContents strict-stox; CTest test `datetime`.
 LICENSE                      MIT, Copyright (c) 2015-2019 Dubalu LLC.
-README.md                    What it is, scope, install, usage.
+README.md                    What it is, install, quick start.
+docs/API.md                  Usage, scope, and everything it parses and formats.
+docs/datetime.d2             The README diagram's source (docs/datetime.svg is rendered from it).
 ARCHITECTURE.md              Parse paths, numeric core, the decoupling delta from Xapiand.
 ```
 

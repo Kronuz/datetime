@@ -17,7 +17,7 @@ include(FetchContent)
 FetchContent_Declare(
   strict_stox
   GIT_REPOSITORY https://github.com/Kronuz/strict-stox.git
-  GIT_TAG        main
+  GIT_TAG        21b7941c71064b5a4e52ffb50a2701ee4aae4c6c
 )
 FetchContent_MakeAvailable(strict_stox)
 

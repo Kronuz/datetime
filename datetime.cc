@@ -288,6 +288,20 @@ static Datetime::Format iso8601_scan(std::string_view datetime, Datetime::tm_t* 
 		return Format::VALID;
 	}
 
+	// The fraction: only filling needs its value; validating needs to know that
+	// parse_fsec would succeed, which is exactly 1 to 62 digits (strict_stod
+	// reads at most 63 characters, the dot included, and a digit run cannot overflow).
+	auto fraction = [&](std::size_t nd) {
+		if constexpr (Fill) {
+			double fsec;
+			if (!parse_fsec(p + 20, nd, fsec)) { return false; }
+			tm->fsec = fsec;
+			return true;
+		} else {
+			return nd >= 1 && nd <= 62;
+		}
+	};
+
 	// Offset hh:mm at p (a negative field is out of range).
 	// Returns VALID with h/m set, or the failing Format.
 	auto offset = [](const char* q, int& h, int& m) {
@@ -319,18 +333,14 @@ static Datetime::Format iso8601_scan(std::string_view datetime, Datetime::tm_t* 
 			while (i < size && p[i] >= '0' && p[i] <= '9') { ++i; }
 			const std::size_t nd = i - 20;
 			if (i == size) {
-				double fsec;
-				if (!parse_fsec(p + 20, nd, fsec)) { return Format::ERROR; }
-				if constexpr (Fill) { tm->fsec = fsec; }
+				if (!fraction(nd)) { return Format::ERROR; }
 				return Format::VALID;
 			}
 			switch (p[i]) {
 				case 'Z':
 					if constexpr (Fill) { tm->is_utc = true; }
 					if (i + 1 == size) {
-						double fsec;
-						if (!parse_fsec(p + 20, nd, fsec)) { return Format::ERROR; }
-						if constexpr (Fill) { tm->fsec = fsec; }
+						if (!fraction(nd)) { return Format::ERROR; }
 						return Format::VALID;
 					}
 					return Format::ERROR;
@@ -341,12 +351,8 @@ static Datetime::Format iso8601_scan(std::string_view datetime, Datetime::tm_t* 
 						int h, m;
 						auto f = offset(p + i + 1, h, m);
 						if (f != Format::VALID) { return f; }
-						double fsec;
-						if (!parse_fsec(p + 20, nd, fsec)) { return Format::ERROR; }
-						if constexpr (Fill) {
-							tm->fsec = fsec;
-							apply_tz(*tm, p[i], h, m, true);
-						}
+						if (!fraction(nd)) { return Format::ERROR; }
+						if constexpr (Fill) { apply_tz(*tm, p[i], h, m, true); }
 						return Format::VALID;
 					}
 					return Format::INVALID;

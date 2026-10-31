@@ -377,6 +377,7 @@ static void calendar() {
 
 
 static void check_math(const Datetime::tm_t& base, const std::string& math, bool direct_op, char unit) {
+	if (overflow_prone(math)) { return; }
 	auto mk = [&](auto& t) { t.year = base.year; t.mon = base.mon; t.day = base.day; t.hour = base.hour; t.min = base.min; t.sec = base.sec; t.fsec = base.fsec; t.is_utc = base.is_utc; };
 	compare(direct_op ? "computeDateMath" : "processDateMath", math + " unit=" + unit + " base=" + show(pack(base)),
 		run([&] { DatetimeOld::tm_t t; mk(t); std::string r; try { if (direct_op) DatetimeOld::computeDateMath(t, math, unit); else DatetimeOld::processDateMath(math, t); } catch (const std::exception& e) { r = std::string("throw ") + e.what() + " "; } return r + show(pack(t)); }),

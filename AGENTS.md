@@ -96,7 +96,9 @@ Expected output ends with `all datetime tests passed`, exit 0. The test target i
 - **Date math is 64-bit (`add_term`).** `+N`/`-N` never touch `int` arithmetic;
   supported years are 1..`INT_MAX`. `test/datemath_test.cc` checks it against a
   days-from-civil reference and is meant to be run under UBSan too.
-- **Loose `Z` is UTC** (`is_utc = true`), like the ISO path.
+- **Loose `Z` and loose offsets are UTC** (`is_utc = true`), like the ISO path.
+- **`normalizeMonths` yields 1..12** for any month; `test/datemath_test.cc` checks
+  every start month and N in -240..240 against the month model in `test/ref.h`.
 
 ## Standalone vs. Xapiand
 

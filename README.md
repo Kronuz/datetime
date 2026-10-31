@@ -37,9 +37,14 @@ formats as before.
 - Date-math terms such as `+2147483647d` are computed in 64-bit arithmetic; they
   used to overflow `int` (undefined behavior). The supported years are 1 to
   `INT_MAX`; a result beyond them throws `Year is out of range`.
+- `+12M` (any month count that lands on a multiple of 12 past December) no longer
+  throws `Month must be in 1..12`: `2020-12-15||+12M` is `2021-12-15`.
+  `normalizeMonths` now maps any month to 1..12 and carries the years.
+- A loose-format offset (`2020/01/02 03:04:05+05:30`) sets `is_utc`, as the ISO
+  form does: an applied offset means the result is the UTC instant.
 - Unchanged on purpose: year 1 with an offset that moves the instant before
   0001-01-01 throws `Year is out of range` (the instant is outside the supported
-  years), and `+12M` from December throws `Month must be in 1..12`.
+  years).
 
 ## 📦 Installation
 

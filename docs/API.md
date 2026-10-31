@@ -48,7 +48,10 @@ Behavior notes:
   negative or out-of-range hour/minute/second is `OUT_OF_RANGE`; a fraction needs
   1 to 62 digits (`...:05.` and `...:05.Z` are `ERROR`).
 - A loose-format string such as `2020/01/02 03:04:05Z` ends in `Z` = UTC and sets
-  `is_utc`, like the ISO form.
+  `is_utc`, like the ISO form; a loose-format offset (`...05+05:30`) is applied
+  and also sets `is_utc`.
+- Month arithmetic (`+N M`, `-N M`) is exact for any N: `normalizeMonths` maps a
+  month to 1..12 and carries whole years; the day clamps to the new month's length.
 - Date-math terms are 64-bit; the supported years are 1 to `INT_MAX`. A result
   outside them, and year 1 with an offset that reaches before 0001-01-01, throw
   `DatetimeError("Year is out of range")`.

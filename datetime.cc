@@ -562,6 +562,8 @@ static inline void process_date_datetime(Datetime::tm_t& tm, std::string_view st
 					}
 				}
 				if (m.tz == '+' || m.tz == '-') {
+					// An applied offset makes the result UTC, as on the ISO path.
+					tm.is_utc = true;
 					apply_tz(tm, m.tz, m.tz_h, m.tz_m, true);
 				} else if (m.tz == 'Z') {
 					// Z is UTC, as on the ISO path: no offset to apply.
@@ -724,7 +726,7 @@ static bool parse_int(std::string_view s, int& out) {
 // arithmetic: |n| <= 2^31 and every field is an int, so no step can overflow.
 // The supported years are 1..INT_MAX; a step that would leave them throws
 // "Year is out of range" (the same error toordinal gives below year 1). The
-// month normalization is the one of normalizeMonths, quirks included.
+// month normalization is the one of normalizeMonths.
 static void add_term(Datetime::tm_t& tm, std::int64_t n, char unit) {
 	std::int64_t year = tm.year, mon = tm.mon, day = tm.day, hour = tm.hour, min = tm.min, sec = tm.sec;
 	auto store = [&] {
@@ -733,13 +735,10 @@ static void add_term(Datetime::tm_t& tm, std::int64_t n, char unit) {
 		tm.hour = fit(hour); tm.min = fit(min); tm.sec = fit(sec);
 	};
 	auto normalize = [&] {
-		if (mon > 12) {
-			year += mon / 12;
-			mon %= 12;
-		} else {
-			const std::int64_t k = (12 - mon) / 12;  // months < 1: whole years to borrow
-			if (mon < 1) { year -= k; mon += 12 * k; }
-		}
+		// Month 1..12 of the year that holds the (possibly out-of-range) month.
+		const std::int64_t k = floor_div(mon - 1, 12);
+		year += k;
+		mon -= 12 * k;
 	};
 	switch (unit) {
 		case 'y': year += n; break;
@@ -761,7 +760,6 @@ static void add_term(Datetime::tm_t& tm, std::int64_t n, char unit) {
 	normalize();
 	store();
 	if (year < 1 || year > INT_MAX) { throw DatetimeError("Year is out of range"); }
-	if (mon < 1 || mon > 12) { throw DatetimeError("Month must be in 1..12"); }
 	const std::int64_t t = days_from_civil(year, static_cast<int>(mon), day) * 86400 + hour * 3600 + min * 60 + sec;
 	set_from_secs(tm, t);
 }
@@ -935,14 +933,14 @@ Datetime::getDays_month(int year, int month)
 
 
 /*
- * Normalize months between -11 and 11
+ * Normalize the month into 1..12, carrying whole years into `year`
  */
 void
 Datetime::normalizeMonths(int& year, int& mon)
 {
 	if (mon > 12) {
-		year += mon / 12;
-		mon %= 12;
+		year += (mon - 1) / 12;
+		mon = (mon - 1) % 12 + 1;
 	} else {
 		while (mon < 1) {
 			mon += 12;

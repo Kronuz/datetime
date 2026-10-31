@@ -23,6 +23,15 @@
 //     now 64-bit with a "Year is out of range" error. The frozen copy cannot be
 //     run on those inputs, so test/datemath_test.cc checks them against a
 //     days-from-civil reference instead, and overflow_prone() skips them here.
+//  5. A month that is a multiple of 12 above 12 ("2020-12-15||+12M") made
+//     normalizeMonths yield month 0 and the old code threw "Month must be in
+//     1..12". Now it is month 12 of the right year. Oracle: the month
+//     arithmetic model in ref.h (single terms), and for chains/parsers that the
+//     new code never throws that message; test/datemath_test.cc checks all
+//     start months and N in -240..240 exhaustively.
+//  6. A loose-format offset ("2020/01/02 03:04:05+05:30") now sets is_utc, as
+//     the ISO path does for an applied offset. Oracle: the old result with
+//     is_utc forced true.
 // The oracle for 1 and 2 is ref_iso() below, a reference verdict written from
 // the grammar; it is cross-checked against the original everywhere the two
 // agree, and against both new overloads everywhere. The oracle for 3 is the
@@ -33,8 +42,6 @@
 //  - Iso8601Parser can throw ("Year is out of range") for year 1 with an offset
 //    that moves the instant before 0001-01-01, despite returning a Format. That
 //    is legitimate: the instant is outside the supported years.
-//  - "+12M" from December (and any month sum that is a multiple of 12 above 12)
-//    throws "Month must be in 1..12" (normalizeMonths yields month 0).
 //
 // Usage: datetime_diff_test [iterations [seed]]   (default 300000 per random family)
 #include <bit>
@@ -50,6 +57,7 @@
 
 #include "datetime.h"
 #include "old/datetime_old.h"
+#include "ref.h"
 
 
 static std::mt19937_64 rng(0x5eed1234abcdULL);
@@ -225,7 +233,8 @@ static Fmt ref_iso(std::string_view s) {
 	return nd >= 1 && nd <= 62 ? Fmt::VALID : Fmt::ERROR;
 }
 
-static std::uint64_t class_neg = 0, class_frac = 0, class_z = 0;
+static std::uint64_t class_neg = 0, class_frac = 0, class_z = 0, class_month = 0, class_off = 0;
+static const char* const month_msg = "Month must be in 1..12";
 
 static void check_string(const std::string& s) {
 	if (overflow_prone(s)) { return; }
@@ -290,6 +299,17 @@ static void check_string(const std::string& s) {
 			auto oracle = run([&] { auto t = DatetimeOld::DatetimeParser(std::string_view(s2)); t.is_utc = true; return show(pack(t)); });
 			compare("DatetimeParser loose Z", s, oracle, new_dp);
 		}
+	} else if (old_dp.threw && old_dp.msg == month_msg) {
+		// Class 5: the old month-0 throw; the new code must not throw it.
+		++class_month;
+		++checks;
+		if (new_dp.threw && new_dp.msg == month_msg) { fail("DatetimeParser month class", s, "still throws"); }
+	} else if (!old_dp.threw && pref == Fmt::INVALID && prefix.find(':') != std::string_view::npos &&
+			prefix.find_first_of("+-", prefix.find(':')) != std::string_view::npos) {
+		// Class 6: a loose-format offset; the oracle is the old result with is_utc set.
+		++class_off;
+		auto oracle = run([&] { auto t = DatetimeOld::DatetimeParser(sv); t.is_utc = true; return show(pack(t)); });
+		compare("DatetimeParser loose offset", s, oracle, new_dp);
 	} else {
 		compare("DatetimeParser", s, old_dp, new_dp);
 	}
@@ -528,9 +548,33 @@ static void calendar() {
 static void check_math(const Datetime::tm_t& base, const std::string& math, bool direct_op, char unit) {
 	if (overflow_prone(math)) { return; }
 	auto mk = [&](auto& t) { t.year = base.year; t.mon = base.mon; t.day = base.day; t.hour = base.hour; t.min = base.min; t.sec = base.sec; t.fsec = base.fsec; t.is_utc = base.is_utc; };
-	compare(direct_op ? "computeDateMath" : "processDateMath", math + " unit=" + unit + " base=" + show(pack(base)),
-		run([&] { DatetimeOld::tm_t t; mk(t); std::string r; try { if (direct_op) DatetimeOld::computeDateMath(t, math, unit); else DatetimeOld::processDateMath(math, t); } catch (const std::exception& e) { r = std::string("throw ") + e.what() + " "; } return r + show(pack(t)); }),
-		run([&] { Datetime::tm_t t; mk(t); std::string r; try { if (direct_op) Datetime::computeDateMath(t, math, unit); else Datetime::processDateMath(math, t); } catch (const std::exception& e) { r = std::string("throw ") + e.what() + " "; } return r + show(pack(t)); }));
+	const std::string label = math + " unit=" + unit + " base=" + show(pack(base));
+	auto old_o = run([&] { DatetimeOld::tm_t t; mk(t); std::string r; try { if (direct_op) DatetimeOld::computeDateMath(t, math, unit); else DatetimeOld::processDateMath(math, t); } catch (const std::exception& e) { r = std::string("throw ") + e.what() + " "; } return r + show(pack(t)); });
+	auto new_o = run([&] { Datetime::tm_t t; mk(t); std::string r; try { if (direct_op) Datetime::computeDateMath(t, math, unit); else Datetime::processDateMath(math, t); } catch (const std::exception& e) { r = std::string("throw ") + e.what() + " "; } return r + show(pack(t)); });
+	const std::string month_throw = std::string("throw ") + month_msg + " ";
+	const bool base_month_ok = base.mon >= 1 && base.mon <= 12;
+	if (old_o.payload.rfind(month_throw, 0) == 0 && (base_month_ok || old_o.payload != new_o.payload)) {
+		// (A base month outside 1..12 can legitimately throw it in both, e.g. "/M".)
+		// Class 5: the old month-0 throw. The new code must not throw it, and a
+		// single valid term must equal the month arithmetic model.
+		++class_month;
+		++checks;
+		if (new_o.payload.rfind(month_throw, 0) == 0) { fail("math month class", label, "still throws"); }
+		if (direct_op && math.size() >= 2 && (math[0] == '+' || math[0] == '-') && math.size() <= 10 && std::string("yMwdhms").find(unit) != std::string::npos &&
+				math.find_first_not_of("0123456789", 1) == std::string::npos && base.year >= 1 && base.mon >= 1 && base.mon <= 12 && base.day >= 1 && base.day <= dim(base.year, base.mon)) {
+			const i128 n = (math[0] == '-' ? -1 : 1) * static_cast<i128>(std::stoll(math.substr(1)));
+			const Expect e = ref_add(base, n, unit);
+			Datetime::tm_t t = base;
+			bool threw = false;
+			try { Datetime::computeDateMath(t, math, unit); } catch (const std::exception&) { threw = true; }
+			++checks;
+			if (threw != e.throws || (!threw && !(t.year == e.y && t.mon == e.mon && t.day == e.day && t.hour == e.hour && t.min == e.min && t.sec == e.sec))) {
+				fail("math month class vs reference", label, show(pack(t)));
+			}
+		}
+		return;
+	}
+	compare(direct_op ? "computeDateMath" : "processDateMath", label, old_o, new_o);
 }
 
 static Datetime::tm_t rand_tm(bool odd) {
@@ -582,6 +626,12 @@ static void tz_tests(std::uint64_t n) {
 		++checks;
 		auto fo = run([&] { DatetimeOld::tm_t t; t.year = base.year; t.mon = base.mon; t.day = base.day; t.hour = base.hour; t.min = base.min; t.sec = base.sec; t.fsec = base.fsec; t.is_utc = base.is_utc; std::string r; try { DatetimeOld::computeTimeZone(t, op, h, m); } catch (const std::exception& e) { r = std::string("throw ") + e.what() + " "; } return r + show(pack(t)); });
 		auto fn = run([&] { Datetime::tm_t t = base; std::string r; try { Datetime::computeTimeZone(t, op, h, m); } catch (const std::exception& e) { r = std::string("throw ") + e.what() + " "; } return r + show(pack(t)); });
+		if (fo.payload.rfind(std::string("throw ") + month_msg + " ", 0) == 0) {
+			++class_month;  // class 5 through an odd base month; the new code must not throw it
+			++checks;
+			if (fn.payload.rfind(std::string("throw ") + month_msg + " ", 0) == 0) { fail("computeTimeZone month class", h + "|" + m, "still throws"); }
+			continue;
+		}
 		compare("computeTimeZone", std::string(1, op) + "|" + h + "|" + m + "| base=" + show(pack(base)), fo, fn);
 	}
 }
@@ -693,7 +743,8 @@ int main(int argc, char** argv) {
 
 	std::printf("changed classes hit: negative field %llu, fraction %llu, loose Z %llu\n",
 		static_cast<unsigned long long>(class_neg), static_cast<unsigned long long>(class_frac), static_cast<unsigned long long>(class_z));
-	if (class_neg == 0 || class_frac == 0 || class_z == 0) { std::printf("a changed class was never exercised\n"); ++failures; }
+	std::printf("                    month %llu, loose offset %llu\n", static_cast<unsigned long long>(class_month), static_cast<unsigned long long>(class_off));
+	if (class_neg == 0 || class_frac == 0 || class_z == 0 || class_month == 0 || class_off == 0) { std::printf("a changed class was never exercised\n"); ++failures; }
 	std::printf("%llu checks, %llu mismatches\n", static_cast<unsigned long long>(checks), static_cast<unsigned long long>(failures));
 	return failures == 0 ? 0 : 1;
 }

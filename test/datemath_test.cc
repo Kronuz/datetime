@@ -1,5 +1,6 @@
 // Date-math and calendar checks against independent references.
 //
+//  0. See ref.h for the references. Months (3) and loose offsets (4) are checked below.
 //  1. Exhaustive over years 1..9999: a brute-force day counter (increment the
 //     date one day at a time with the Gregorian leap rule) is the oracle for
 //     toordinal, timegm, timestamp, to_tm_t and the round trips.
@@ -19,44 +20,13 @@
 #include <string>
 
 #include "datetime.h"
+#include "ref.h"
 
 static std::mt19937_64 rng(0xda7e3a7bULL);
 static std::uint64_t checks = 0, failures = 0;
 static std::uint64_t rnd(std::uint64_t n) { return rng() % n; }
 
 #define EXPECT(cond, ...) do { ++checks; if (!(cond)) { ++failures; if (failures <= 25) { std::printf("FAIL %s:%d %s: ", __FILE__, __LINE__, #cond); std::printf(__VA_ARGS__); std::printf("\n"); } } } while (0)
-
-using i128 = __int128;
-
-static i128 floordiv(i128 a, i128 b) { i128 q = a / b; return (a % b != 0 && ((a < 0) != (b < 0))) ? q - 1 : q; }
-
-// Hinnant: days since 1970-01-01 of a proleptic Gregorian date. Month 1..12;
-// the day may exceed the month (it is added linearly).
-static i128 ref_days(i128 y, int m, i128 d) {
-	y -= m <= 2;
-	const i128 era = floordiv(y, 400);
-	const i128 yoe = y - era * 400;
-	const i128 doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
-	const i128 doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-	return era * 146097 + doe - 719468;
-}
-
-static void ref_civil(i128 z, i128& y, int& m, int& d) {
-	z += 719468;
-	const i128 era = floordiv(z, 146097);
-	const i128 doe = z - era * 146097;
-	const i128 yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-	y = yoe + era * 400;
-	const i128 doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-	const i128 mp = (5 * doy + 2) / 153;
-	d = static_cast<int>(doy - (153 * mp + 2) / 5 + 1);
-	m = static_cast<int>(mp < 10 ? mp + 3 : mp - 9);
-	y += m <= 2;
-}
-
-static bool leap(i128 y) { return y % 4 == 0 && (y % 100 != 0 || y % 400 == 0); }
-static int dim(i128 y, int m) { static const int d[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 }; return d[m - 1] + (m == 2 && leap(y)); }
-
 
 // 1. Exhaustive years 1..9999 against a brute-force day counter.
 static void exhaustive_years() {
@@ -82,50 +52,6 @@ static void exhaustive_years() {
 	EXPECT(count == 3652059, "total days 0001..9999 = %lld", static_cast<long long>(count));
 }
 
-
-// 2. Date math with huge terms against the reference.
-struct Expect {
-	bool throws = false;
-	i128 y = 0;
-	int mon = 0, day = 0, hour = 0, min = 0, sec = 0;
-};
-
-// n units of `unit` added to a valid base. Mirrors the documented semantics:
-// y/M move the field (M clamps the day to the new month's length), w/d/h/m/s add
-// linearly; the supported years are 1..INT_MAX.
-static Expect ref_add(const Datetime::tm_t& b, i128 n, char unit) {
-	Expect e;
-	i128 y = b.year;
-	int mo = b.mon;
-	i128 d = b.day, h = b.hour, mi = b.min, s = b.sec;
-	switch (unit) {
-		case 'y': y += n; break;
-		case 'M': {
-			const i128 sum = static_cast<i128>(b.mon) + n;
-			if (sum > 12 && sum % 12 == 0) { e.throws = true; return e; }  // documented quirk: month 0
-			const i128 total = y * 12 + (b.mon - 1) + n;
-			y = floordiv(total, 12);
-			mo = static_cast<int>(total - y * 12) + 1;
-			if (y >= 1 && y <= INT_MAX && d > dim(y, mo)) { d = dim(y, mo); }
-			break;
-		}
-		case 'w': d += 7 * n; break;
-		case 'd': d += n; break;
-		case 'h': h += n; break;
-		case 'm': mi += n; break;
-		default: s += n; break;
-	}
-	if (y < 1 || y > INT_MAX) { e.throws = true; return e; }
-	const i128 t = ref_days(y, mo, d) * 86400 + h * 3600 + mi * 60 + s;
-	i128 ry;
-	int rm, rd;
-	const i128 z = floordiv(t, 86400);
-	ref_civil(z, ry, rm, rd);
-	if (ry > INT_MAX) { e.throws = true; return e; }
-	const int rem = static_cast<int>(t - z * 86400);
-	e.y = ry; e.mon = rm; e.day = rd; e.hour = rem / 3600; e.min = rem % 3600 / 60; e.sec = rem % 60;
-	return e;
-}
 
 static void check_term(const Datetime::tm_t& base, i128 n, char unit) {
 	const Expect e = ref_add(base, n, unit);
@@ -204,11 +130,51 @@ static void huge_terms(std::uint64_t iterations) {
 }
 
 
+// 3. Months: every start month, several years (leap and century edges), every
+// day-of-month edge, and N in -240..240 (including all multiples of 12), against
+// the month arithmetic model with end-of-month clamping; and normalizeMonths
+// itself over -500..500.
+static void month_arithmetic() {
+	for (int y : { 1, 2, 4, 100, 399, 400, 1900, 1999, 2000, 2020, 2023, 2024, 2100, 9998, 9999 }) {
+		for (int m = 1; m <= 12; ++m) {
+			for (int d : { 1, 15, 28, 29, 30, 31 }) {
+				if (d > dim(y, m)) { continue; }
+				Datetime::tm_t base(y, m, d, 12, 30, 15);
+				for (int n = -240; n <= 240; ++n) { check_term(base, n, 'M'); }
+			}
+		}
+	}
+	// The case from the report, spelled out.
+	auto t = Datetime::DatetimeParser(std::string_view("2020-12-15||+12M"));
+	EXPECT(t.year == 2021 && t.mon == 12 && t.day == 15, "2020-12-15 +12M -> %d-%d-%d", t.year, t.mon, t.day);
+	auto c = Datetime::DatetimeParser(std::string_view("2020-01-31||+1M"));
+	EXPECT(c.year == 2020 && c.mon == 2 && c.day == 29, "2020-01-31 +1M clamps to Feb 29");
+	for (int mon = -500; mon <= 500; ++mon) {
+		int year = 2000, mo = mon;
+		Datetime::normalizeMonths(year, mo);
+		const int k = static_cast<int>(floordiv(mon - 1, 12));
+		EXPECT(mo == mon - 12 * k && mo >= 1 && mo <= 12 && year == 2000 + k, "normalizeMonths(%d) -> %d/%d", mon, year, mo);
+	}
+}
+
+// 4. A loose-format offset makes the result UTC, as the ISO form does.
+static void loose_offset_is_utc() {
+	for (const char* s : { "2020/01/02 03:04:05+05:30", "2020 01 02 3:04 -02:00", "2020/01/02 03:04:05.5 +00:00" }) {
+		EXPECT(Datetime::DatetimeParser(std::string_view(s)).is_utc, "%s is_utc", s);
+	}
+	EXPECT(!Datetime::DatetimeParser(std::string_view("2020/01/02 03:04:05")).is_utc, "no offset: not UTC");
+	EXPECT(!Datetime::DatetimeParser(std::string_view("2020/01/02")).is_utc, "date only: not UTC");
+	EXPECT(Datetime::DatetimeParser(std::string_view("2020-01-02T03:04:05+05:30")).is_utc, "ISO offset is UTC");
+}
+
+
 int main(int argc, char** argv) {
 	const std::uint64_t n = argc > 1 ? std::strtoull(argv[1], nullptr, 10) : 200000;
 	if (argc > 2) { rng.seed(std::strtoull(argv[2], nullptr, 10)); }
 	exhaustive_years();
 	huge_terms(n);
+	month_arithmetic();
+	loose_offset_is_utc();
 	std::printf("%llu checks, %llu failures\n", static_cast<unsigned long long>(checks), static_cast<unsigned long long>(failures));
 	return failures == 0 ? 0 : 1;
 }

@@ -1,0 +1,8 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/gmendezb/code/Kronuz/libs/datetime/dbg/cmake_install.cmake",
+		"/Users/gmendezb/code/Kronuz/libs/datetime/dbg/_deps/strict_stox-build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

@@ -1,0 +1,1 @@
+/usr/local/bin/c++ -g -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/datetime_datemath_test.dir/test/datemath_test.cc.o -o datetime_datemath_test  libdatetime.a

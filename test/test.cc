@@ -242,11 +242,18 @@ static void test_fixed_behaviors() {
 		assert(!Datetime::isDatetime(s));
 	}
 	// A fraction dot with no digits is an error in both overloads.
-	for (const char* s : { "2020-01-02T03:04:05.", "2020-01-02T03:04:05.Z", "2020-01-02T03:04:05.+01:00" }) {
+	for (const char* s : { "2020-01-02T03:04:05.Z", "2020-01-02T03:04:05.+01:00" }) {
 		Datetime::tm_t tm;
 		assert(Datetime::Iso8601Parser(std::string_view(s), tm) == Format::ERROR);
 		assert(Datetime::Iso8601Parser(std::string_view(s)) == Format::ERROR);
 		assert(!Datetime::isDatetime(s));
+	}
+	// A bare trailing dot is the 20-character shape: not ISO, and not loose either.
+	{
+		Datetime::tm_t tm;
+		assert(Datetime::Iso8601Parser(std::string_view("2020-01-02T03:04:05."), tm) == Format::INVALID);
+		assert(Datetime::Iso8601Parser(std::string_view("2020-01-02T03:04:05.")) == Format::INVALID);
+		assert(!Datetime::isDatetime("2020-01-02T03:04:05."));
 	}
 	// Loose format ending in Z is UTC, like the ISO path.
 	auto z = Datetime::DatetimeParser(std::string_view("2020/01/02 03:04:05Z"));

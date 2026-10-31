@@ -43,6 +43,23 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(datetime_test PRIVATE datetime)
   add_test(NAME datetime COMMAND datetime_test)
 
+  # Differential test against the frozen original implementation (test/old,
+  # namespace DatetimeOld): random, mutated and exhaustive inputs, valid and
+  # invalid, compared field by field. Argument: iterations per random family.
+  add_executable(datetime_diff_test test/diff_test.cc test/old/datetime_old.cc)
+  target_include_directories(datetime_diff_test PRIVATE test)
+  target_link_libraries(datetime_diff_test PRIVATE datetime)
+  add_test(NAME datetime_diff COMMAND datetime_diff_test 100000)
+
+  # Benchmark against the frozen original (no external comparators needed):
+  #   cmake -B build -DDATETIME_BUILD_BENCH=ON -DCMAKE_BUILD_TYPE=Release
+  option(DATETIME_BUILD_BENCH "Build the old-vs-new benchmark" OFF)
+  if(DATETIME_BUILD_BENCH)
+    add_executable(datetime_bench bench/bench.cc test/old/datetime_old.cc)
+    target_include_directories(datetime_bench PRIVATE test)
+    target_link_libraries(datetime_bench PRIVATE datetime)
+  endif()
+
   # A runnable tour of the library (not a test): build & run ./build/datetime_demo
   add_executable(datetime_demo examples/demo.cc)
   target_link_libraries(datetime_demo PRIVATE datetime)

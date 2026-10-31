@@ -23,7 +23,12 @@
 
 #include "datetime.h"
 
+#include <algorithm>                              // for std::min
+#include <bit>                                    // for std::bit_cast
 #include <cassert>                                // for assert
+#include <cstring>                                // for std::memcpy
+#include <climits>                                // for INT_MIN, INT_MAX
+#include <cstdint>                                // for std::int64_t
 #include <cctype>                                 // for std::isdigit
 #include <cmath>                                  // for ceil
 #include <exception>                              // for exception
@@ -51,12 +56,450 @@ static constexpr int cumdays[2][12] = {
 };
 
 
+// ---------------------------------------------------------------------------
+// Integer civil-calendar core (no libc time-zone state, no throwing checks).
+// Proleptic Gregorian; days are counted from 1970-01-01.
+// ---------------------------------------------------------------------------
+
+static constexpr std::int64_t floor_div(std::int64_t a, std::int64_t b) {
+	auto q = a / b;
+	return (a % b != 0 && (a < 0) != (b < 0)) ? q - 1 : q;
+}
+
+// Days since 1970-01-01 of year-month-day; `d` is used linearly, so an
+// out-of-month day rolls over like the old toordinal-based arithmetic.
+static constexpr std::int64_t days_from_civil(std::int64_t y, int m, std::int64_t d) {
+	y -= m <= 2;
+	const std::int64_t era = floor_div(y, 400);
+	const std::int64_t yoe = y - era * 400;
+	const std::int64_t doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
+	const std::int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+	return era * 146097 + doe - 719468;
+}
+
+static constexpr void civil_from_days(std::int64_t z, std::int64_t& y, int& m, int& d) {
+	z += 719468;
+	const std::int64_t era = floor_div(z, 146097);
+	const std::int64_t doe = z - era * 146097;
+	const std::int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+	const std::int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+	const std::int64_t mp = (5 * doy + 2) / 153;
+	d = static_cast<int>(doy - (153 * mp + 2) / 5 + 1);
+	m = static_cast<int>(mp < 10 ? mp + 3 : mp - 9);
+	y = yoe + era * 400 + (m <= 2);
+}
+
+// Seconds since the epoch to broken-down fields (floor semantics, like gmtime_r).
+static inline void civil_from_secs(std::int64_t t, std::int64_t& y, int& mon, int& day, int& hour, int& min, int& sec, int* wday = nullptr) {
+	const std::int64_t z = floor_div(t, 86400);
+	const auto rem = static_cast<int>(t - z * 86400);
+	civil_from_days(z, y, mon, day);
+	hour = rem / 3600;
+	min = rem % 3600 / 60;
+	sec = rem % 60;
+	if (wday) {
+		*wday = static_cast<int>(((z % 7) + 11) % 7);  // 1970-01-01 is a Thursday (4)
+	}
+}
+
+static inline void set_from_secs(Datetime::tm_t& tm, std::int64_t t) {
+	std::int64_t y;
+	civil_from_secs(t, y, tm.mon, tm.day, tm.hour, tm.min, tm.sec);
+	tm.year = static_cast<int>(y);
+}
+
+static inline std::int64_t secs_of(const Datetime::tm_t& tm) {
+	return days_from_civil(tm.year, tm.mon, tm.day) * 86400 + tm.hour * 3600LL + tm.min * 60LL + tm.sec;
+}
+
+// Seconds at 0001-01-01T00:00:00; the old code threw "Year is out of range"
+// as soon as a date-math step started from a year below it.
+static constexpr std::int64_t MIN_YEAR1_SECS = -62135596800LL;
+
+
+// Offsets: the old code applied "-H h" then "-M m" through computeDateMath,
+// each step renormalizing the fields (and the second step throwing when the
+// first one left year 0). One integer sum gives the same fields.
+// Precondition: tm.year >= 1 and 1 <= tm.mon <= 12.
+// `day_in_month` promises 1 <= tm.day <= days in tm.mon; then an offset that
+// keeps the time of day within the same date touches only hour/min/sec.
+static inline void apply_tz(Datetime::tm_t& tm, char op, int h, int m, bool day_in_month) {
+	const int sign = op == '+' ? -1 : 1;
+	if (day_in_month) {
+		const auto sod = tm.hour * 3600LL + tm.min * 60LL + tm.sec + sign * (h * 3600LL + m * 60LL);
+		if (sod >= 0 && sod < 86400) {
+			tm.hour = static_cast<int>(sod / 3600);
+			tm.min = static_cast<int>(sod % 3600 / 60);
+			tm.sec = static_cast<int>(sod % 60);
+			return;
+		}
+	}
+	auto t = secs_of(tm) + sign * h * 3600LL;
+	if (t < MIN_YEAR1_SECS) {
+		// The second step had already applied its minutes when timegm threw.
+		set_from_secs(tm, t);
+		tm.min += sign * m;
+		throw DatetimeError("Year is out of range");
+	}
+	set_from_secs(tm, t + sign * m * 60LL);
+}
+
+
+// ---------------------------------------------------------------------------
+// Field readers. The old code read each fixed-width field with strict_stoul
+// (strtoul on a copy): optional leading isspace, optional sign, then digits
+// up to the end of the field, nothing else. `field` takes the 2/4 plain digits
+// fast path and otherwise emulates that grammar exactly. A negative value
+// wraps as an unsigned long in the old code (`wrap`); it becomes -v as an int.
+// ---------------------------------------------------------------------------
+
+static bool slow_field(const char* p, int n, int& v, bool& wrap) {
+	int i = 0;
+	while (i < n && std::isspace(static_cast<unsigned char>(p[i]))) { ++i; }
+	bool neg = false;
+	if (i < n && (p[i] == '+' || p[i] == '-')) {
+		neg = p[i] == '-';
+		++i;
+	}
+	const int first = i;
+	int acc = 0;
+	while (i < n && p[i] >= '0' && p[i] <= '9') {
+		acc = acc * 10 + (p[i] - '0');
+		++i;
+	}
+	v = 0;
+	wrap = false;
+	if (i == first || i != n) {
+		return false;
+	}
+	v = neg ? -acc : acc;
+	wrap = neg && acc != 0;
+	return true;
+}
+
+static inline bool field(const char* p, int n, int& v, bool& wrap) {
+	int acc = 0;
+	for (int i = 0; i < n; ++i) {
+		const unsigned d = static_cast<unsigned char>(p[i]) - '0';
+		if (d > 9) {
+			return slow_field(p, n, v, wrap);
+		}
+		acc = acc * 10 + static_cast<int>(d);
+	}
+	v = acc;
+	wrap = false;
+	return true;
+}
+
+// Fraction digits to a normalized fsec. Up to 6 digits are integer microseconds
+// (round(strtod(".ddd") * 1e6) / 1e6 is exactly micro / 1e6); anything else
+// takes the original strict_stod + normalize_fsec path.
+static inline bool parse_fsec(const char* digits, std::size_t nd, double& out) {
+	if (nd >= 1 && nd <= 6) {
+		unsigned micro = 0;
+		for (std::size_t i = 0; i < nd; ++i) {
+			micro = micro * 10 + static_cast<unsigned>(digits[i] - '0');
+		}
+		static constexpr unsigned pow10[] = { 1, 10, 100, 1000, 10000, 100000, 1000000 };
+		out = static_cast<double>(micro * pow10[6 - nd]) / DATETIME_MICROSECONDS;
+		return true;
+	}
+	std::string buf;
+	buf.reserve(nd + 1);
+	buf.push_back('.');
+	buf.append(digits, nd);
+	int errno_save;
+	auto fsec = strict_stod(&errno_save, buf);
+	if (errno_save != 0) { return false; }
+	out = Datetime::normalize_fsec(fsec);
+	return true;
+}
+
+
+// ---------------------------------------------------------------------------
+// ISO 8601 scanner, shared by both Iso8601Parser overloads. Fill == true is the
+// overload that fills a tm_t (writing fields in the old order, including the
+// partial writes on failure); Fill == false only validates. The two differ in
+// signedness exactly as the old pair did (the filling one compares hour/min/sec
+// as int, the validating one as unsigned long; tz fields are unsigned in both),
+// and the validating one never parses the fraction.
+// ---------------------------------------------------------------------------
+
+template <bool Fill>
+static Datetime::Format iso8601_scan(std::string_view datetime, Datetime::tm_t* tm) {
+	using Datetime::Format;
+	const auto size = datetime.size();
+	const char* p = datetime.data();
+
+	if (size == 10) {
+		if (p[4] != '-' || p[7] != '-') { return Format::INVALID; }
+	} else if (size < 19) {
+		return Format::INVALID;
+	} else {
+		if (p[4] != '-' || p[7] != '-' || (p[10] != 'T' && p[10] != ' ') || p[13] != ':' || p[16] != ':') { return Format::INVALID; }
+		if (size == 20) {
+			if (p[19] != 'Z') { return Format::INVALID; }
+			if constexpr (Fill) { tm->is_utc = true; }
+		}
+	}
+
+	int year, mon, day;
+	bool w;
+	bool ok = field(p, 4, year, w);
+	if constexpr (Fill) { tm->year = year; }
+	if (!ok) { return Format::ERROR; }
+	ok = field(p + 5, 2, mon, w);
+	if constexpr (Fill) { tm->mon = mon; }
+	if (!ok) { return Format::ERROR; }
+	ok = field(p + 8, 2, day, w);
+	if constexpr (Fill) { tm->day = day; }
+	if (!ok) { return Format::ERROR; }
+	if (!Datetime::isValidDate(year, mon, day)) { return Format::OUT_OF_RANGE; }
+
+	if (size == 10) {
+		if constexpr (Fill) {
+			tm->hour = 0;
+			tm->min = 0;
+			tm->sec = 0;
+			tm->fsec = 0.0;
+		}
+		return Format::VALID;
+	}
+
+	// hour/min/sec: int compare when filling, unsigned long compare otherwise.
+	auto below = [](int v, bool wrap, int limit) {
+		if constexpr (Fill) { return v < limit; } else { return !wrap && v < limit; }
+	};
+	int hour, min, sec;
+	ok = field(p + 11, 2, hour, w);
+	if constexpr (Fill) { tm->hour = hour; }
+	if (!ok) { return Format::ERROR; }
+	if (!below(hour, w, 24)) { return Format::OUT_OF_RANGE; }
+	ok = field(p + 14, 2, min, w);
+	if constexpr (Fill) { tm->min = min; }
+	if (!ok) { return Format::ERROR; }
+	if (!below(min, w, 60)) { return Format::OUT_OF_RANGE; }
+	ok = field(p + 17, 2, sec, w);
+	if constexpr (Fill) { tm->sec = sec; }
+	if (!ok) { return Format::ERROR; }
+	if (!below(sec, w, 60)) { return Format::OUT_OF_RANGE; }
+
+	if (size == 19 || size == 20) {
+		if constexpr (Fill) { tm->fsec = 0.0; }
+		return Format::VALID;
+	}
+
+	// Offset hh:mm at p (unsigned compares in both overloads).
+	// Returns VALID with h/m set, or the failing Format.
+	auto offset = [](const char* q, int& h, int& m) {
+		bool hw, mw;
+		if (!field(q, 2, h, hw)) { return Format::ERROR; }
+		if (hw || h >= 24) { return Format::OUT_OF_RANGE; }
+		if (!field(q + 3, 2, m, mw)) { return Format::ERROR; }
+		if (mw || m >= 60) { return Format::OUT_OF_RANGE; }
+		return Format::VALID;
+	};
+
+	switch (p[19]) {
+		case '+':
+		case '-': {
+			if constexpr (Fill) { tm->is_utc = true; }
+			if (size == 25 && p[22] == ':') {
+				if constexpr (Fill) { tm->fsec = 0.0; }
+				int h, m;
+				auto f = offset(p + 20, h, m);
+				if (f != Format::VALID) { return f; }
+				if constexpr (Fill) { apply_tz(*tm, p[19], h, m, true); }
+				return Format::VALID;
+			}
+			return Format::INVALID;
+		}
+		case '.': {
+			std::size_t i = 20;
+			while (i < size && p[i] >= '0' && p[i] <= '9') { ++i; }
+			const std::size_t nd = i - 20;
+			if (i == size) {
+				if constexpr (Fill) {
+					double fsec;
+					if (!parse_fsec(p + 20, nd, fsec)) { return Format::ERROR; }
+					tm->fsec = fsec;
+				}
+				return Format::VALID;
+			}
+			switch (p[i]) {
+				case 'Z':
+					if constexpr (Fill) { tm->is_utc = true; }
+					if (i + 1 == size) {
+						if constexpr (Fill) {
+							double fsec;
+							if (!parse_fsec(p + 20, nd, fsec)) { return Format::ERROR; }
+							tm->fsec = fsec;
+						}
+						return Format::VALID;
+					}
+					return Format::ERROR;
+				case '+':
+				case '-':
+					if constexpr (Fill) { tm->is_utc = true; }
+					if (size - i == 6 && p[i + 3] == ':') {
+						int h, m;
+						auto f = offset(p + i + 1, h, m);
+						if (f != Format::VALID) { return f; }
+						if constexpr (Fill) {
+							double fsec;
+							if (!parse_fsec(p + 20, nd, fsec)) { return Format::ERROR; }
+							tm->fsec = fsec;
+							apply_tz(*tm, p[i], h, m, true);
+						}
+						return Format::VALID;
+					}
+					return Format::INVALID;
+				default:
+					return Format::INVALID;
+			}
+		}
+		default:
+			return Format::INVALID;
+	}
+}
+
+
+// ---------------------------------------------------------------------------
+// Hand scanner for the grammar of date_re (kept exported, no longer used):
+//
+//   YYYY ([-/ ]?) MM \2 DD
+//   ( [T ]? H:mm ( :ss ([.,]digits+)? )? ( [ ]*[+-]H:mm | Z )? )?
+//   ( [ ]* || [ ]* [+-,./0-9yMwdhms]+ )?
+//
+// with H = [01]?[0-9] | 2[0-3], MM = 01-12, DD = 00-31, mm/ss = 00-59. Every
+// optional part is introduced by a character no other alternative can start
+// with, so the greedy scan below picks the same captures as the regex.
+// ---------------------------------------------------------------------------
+
+struct DateReMatch {
+	int year = 0, mon = 0, day = 0;
+	bool has_time = false;
+	int hour = 0, min = 0, sec = 0;
+	bool has_sec = false;
+	const char* frac = nullptr;
+	std::size_t frac_n = 0;
+	char tz = 0;  // '+', '-', 'Z' or 0
+	int tz_h = 0, tz_m = 0;
+	bool has_math = false;
+	std::string_view math;
+};
+
+static bool scan_date_re(std::string_view s, DateReMatch& r) {
+	const char* p = s.data();
+	const std::size_t n = s.size();
+	auto dig = [&](std::size_t k) { return k < n && p[k] >= '0' && p[k] <= '9'; };
+	auto dv = [&](std::size_t k) { return p[k] - '0'; };
+
+	if (!(dig(0) && dig(1) && dig(2) && dig(3))) { return false; }
+	r.year = dv(0) * 1000 + dv(1) * 100 + dv(2) * 10 + dv(3);
+	std::size_t i = 4;
+	char sep = 0;
+	if (i < n && (p[i] == '-' || p[i] == '/' || p[i] == ' ')) {
+		sep = p[i++];
+	}
+	if (!(dig(i) && dig(i + 1))) { return false; }
+	r.mon = dv(i) * 10 + dv(i + 1);
+	if (r.mon < 1 || r.mon > 12) { return false; }
+	i += 2;
+	if (sep) {
+		if (i >= n || p[i] != sep) { return false; }
+		++i;
+	}
+	if (!(dig(i) && dig(i + 1))) { return false; }
+	r.day = dv(i) * 10 + dv(i + 1);
+	if (r.day > 31) { return false; }
+	i += 2;
+
+	// H followed by ':' at k; returns the digit count (0: not an hour).
+	auto hour_at = [&](std::size_t k, int& h) -> int {
+		if (dig(k)) {
+			if (k + 1 < n && p[k + 1] == ':') {
+				h = dv(k);
+				return 1;
+			}
+			if (dig(k + 1) && k + 2 < n && p[k + 2] == ':') {
+				const int a = dv(k), b = dv(k + 1);
+				if (a <= 1 || (a == 2 && b <= 3)) {
+					h = a * 10 + b;
+					return 2;
+				}
+			}
+		}
+		return 0;
+	};
+	auto min_at = [&](std::size_t k, int& v) {
+		if (dig(k) && dig(k + 1) && p[k] <= '5') {
+			v = dv(k) * 10 + dv(k + 1);
+			return true;
+		}
+		return false;
+	};
+
+	std::size_t t = i;
+	if (t < n && (p[t] == 'T' || p[t] == ' ')) { ++t; }
+	int hn = hour_at(t, r.hour);
+	if (hn) {
+		r.has_time = true;
+		t += hn + 1;
+		if (!min_at(t, r.min)) { return false; }
+		i = t + 2;
+		if (i < n && p[i] == ':') {
+			if (!min_at(i + 1, r.sec)) { return false; }
+			r.has_sec = true;
+			i += 3;
+			if (i < n && (p[i] == '.' || p[i] == ',')) {
+				std::size_t f = i + 1;
+				while (dig(f)) { ++f; }
+				if (f == i + 1) { return false; }
+				r.frac = p + i + 1;
+				r.frac_n = f - i - 1;
+				i = f;
+			}
+		}
+		std::size_t j = i;
+		while (j < n && p[j] == ' ') { ++j; }
+		if (j < n && (p[j] == '+' || p[j] == '-')) {
+			r.tz = p[j];
+			hn = hour_at(j + 1, r.tz_h);
+			if (!hn) { return false; }
+			j += 1 + hn + 1;
+			if (!min_at(j, r.tz_m)) { return false; }
+			i = j + 2;
+		} else if (i < n && p[i] == 'Z') {
+			r.tz = 'Z';
+			++i;
+		}
+	}
+
+	std::size_t j = i;
+	while (j < n && p[j] == ' ') { ++j; }
+	if (j + 1 < n && p[j] == '|' && p[j + 1] == '|') {
+		j += 2;
+		while (j < n && p[j] == ' ') { ++j; }
+		if (j >= n) { return false; }
+		for (std::size_t k = j; k < n; ++k) {
+			const char c = p[k];
+			if (!((c >= '+' && c <= '/') || (c >= '0' && c <= '9') || c == 'y' || c == 'M' || c == 'w' || c == 'd' || c == 'h' || c == 'm' || c == 's')) {
+				return false;
+			}
+		}
+		r.has_math = true;
+		r.math = s.substr(j);
+		return true;
+	}
+	return i == n;
+}
+
+
 // Parse a datetime string (ISO 8601, optionally followed by `|| <date math>`)
 // into a tm_t. This is the pure-string path that DatetimeParser(string_view)
 // delegates to. The MsgPack/structured-object path lives in the Xapiand glue.
 static inline void process_date_datetime(Datetime::tm_t& tm, std::string_view str_datetime) {
-	std::cmatch m;
-
 	// Check if datetime is ISO 8601.
 	auto pos = str_datetime.find("||");
 	if (pos == std::string_view::npos) {
@@ -86,54 +529,52 @@ static inline void process_date_datetime(Datetime::tm_t& tm, std::string_view st
 		}
 	}
 
-	int errno_save;
-	if (std::regex_match(str_datetime.begin(), str_datetime.end(), m, Datetime::date_re) && static_cast<std::size_t>(m.length(0)) == str_datetime.size()) {
-		tm.year = strict_stoi(&errno_save, m.str(1));
-		if (errno_save != 0) { goto error; }
-		tm.mon = strict_stoi(&errno_save, m.str(3));
-		if (errno_save != 0) { goto error; }
-		tm.day = strict_stoi(&errno_save, m.str(4));
-		if (errno_save != 0) { goto error; }
-		if (!Datetime::isValidDate(tm.year, tm.mon, tm.day)) {
-			goto error_out_of_range;
-		}
+	{
+		DateReMatch m;
+		if (scan_date_re(str_datetime, m)) {
+			tm.year = m.year;
+			tm.mon = m.mon;
+			tm.day = m.day;
+			if (!Datetime::isValidDate(tm.year, tm.mon, tm.day)) {
+				goto error_out_of_range;
+			}
 
-		// Process time
-		if (m.length(5) == 0) {
-			tm.hour = tm.min = tm.sec = 0;
-			tm.fsec = 0.0;
-		} else {
-			tm.hour = strict_stoi(&errno_save, m.str(6));
-			if (errno_save != 0) { goto error; }
-			tm.min = strict_stoi(&errno_save, m.str(7));
-			if (errno_save != 0) { goto error; }
-			if (m.length(8) == 0) {
-				tm.sec = 0;
+			// Process time
+			if (!m.has_time) {
+				tm.hour = tm.min = tm.sec = 0;
 				tm.fsec = 0.0;
 			} else {
-				tm.sec = strict_stoi(&errno_save, m.str(9));
-				if (errno_save != 0) { goto error; }
-				if (m.length(10) == 0) {
+				tm.hour = m.hour;
+				tm.min = m.min;
+				if (!m.has_sec) {
+					tm.sec = 0;
 					tm.fsec = 0.0;
 				} else {
-					auto fs = m.str(11);
-					fs.insert(0, 1, '.');
-					auto fsec = strict_stod(&errno_save, fs);
-					if (errno_save != 0) { goto error; }
-					tm.fsec = Datetime::normalize_fsec(fsec);
+					tm.sec = m.sec;
+					if (!m.frac) {
+						tm.fsec = 0.0;
+					} else {
+						double fsec;
+						if (!parse_fsec(m.frac, m.frac_n, fsec)) { goto error; }
+						tm.fsec = fsec;
+					}
+				}
+				if (m.tz == '+' || m.tz == '-') {
+					apply_tz(tm, m.tz, m.tz_h, m.tz_m, true);
+				} else if (m.tz == 'Z') {
+					// The original handed an unmatched (empty) offset to computeTimeZone,
+					// which always failed here; kept as is.
+					throw DatetimeError("Invalid format in Datetime Math unit: 'h'. '' must be numeric");
 				}
 			}
-			if (m.length(12) != 0) {
-				Datetime::computeTimeZone(tm, str_datetime[m.position(13) - 1], m.str(13), m.str(14));
+
+			// Process Datetime Math
+			if (m.has_math) {
+				Datetime::processDateMath(m.math, tm);
 			}
-		}
 
-		// Process Datetime Math
-		if (m.length(16) != 0) {
-			Datetime::processDateMath(m.str(16), tm);
+			return;
 		}
-
-		return;
 	}
 
 error:
@@ -158,377 +599,58 @@ Datetime::DatetimeParser(std::string_view datetime)
 
 /*
  * Full struct tm according to the datetime in ISO 8601 format.
+ * (Iso8601Parser(datetime) below validates only; both share iso8601_scan.)
  */
 Datetime::Format
 Datetime::Iso8601Parser(std::string_view datetime, tm_t& tm)
 {
-	int errno_save;
-	auto size = datetime.size();
-	switch (size) {
-		case 10: // 0000-00-00
-			if (datetime[4] == '-' && datetime[7] == '-') {
-				tm.year  = strict_stoul(&errno_save, datetime.substr(0, 4));
-				if (errno_save != 0) { return Format::ERROR; }
-				tm.mon   = strict_stoul(&errno_save, datetime.substr(5, 2));
-				if (errno_save != 0) { return Format::ERROR; }
-				tm.day   = strict_stoul(&errno_save, datetime.substr(8, 2));
-				if (errno_save != 0) { return Format::ERROR; }
-				if (isValidDate(tm.year, tm.mon, tm.day)) {
-					tm.hour = 0;
-					tm.min  = 0;
-					tm.sec  = 0;
-					tm.fsec = 0.0;
-					return Format::VALID;
-				}
-				return Format::OUT_OF_RANGE;
-			}
-			return Format::INVALID;
-		case 19: // 0000-00-00[T ]00:00:00
-			if (datetime[4] == '-' && datetime[7] == '-' && (datetime[10] == 'T' || datetime[10] == ' ') && datetime[13] == ':' && datetime[16] == ':') {
-				tm.year  = strict_stoul(&errno_save, datetime.substr(0, 4));
-				if (errno_save != 0) { return Format::ERROR; }
-				tm.mon   = strict_stoul(&errno_save, datetime.substr(5, 2));
-				if (errno_save != 0) { return Format::ERROR; }
-				tm.day   = strict_stoul(&errno_save, datetime.substr(8, 2));
-				if (errno_save != 0) { return Format::ERROR; }
-				if (isValidDate(tm.year, tm.mon, tm.day)) {
-					tm.hour = strict_stoul(&errno_save, datetime.substr(11, 2));
-					if (errno_save != 0) { return Format::ERROR; }
-					if (tm.hour < 24) {
-						tm.min = strict_stoul(&errno_save, datetime.substr(14, 2));
-						if (errno_save != 0) { return Format::ERROR; }
-						if (tm.min < 60) {
-							tm.sec = strict_stoul(&errno_save, datetime.substr(17, 2));
-							if (errno_save != 0) { return Format::ERROR; }
-							if (tm.sec < 60) {
-								tm.fsec = 0.0;
-								return Format::VALID;
-							}
-						}
-					}
-				}
-				return Format::OUT_OF_RANGE;
-			}
-			return Format::INVALID;
-		case 20: // 0000-00-00[T ]00:00:00Z
-			if (datetime[4] == '-' && datetime[7] == '-' && (datetime[10] == 'T' || datetime[10] == ' ') && datetime[13] == ':' &&
-				datetime[16] == ':' && datetime[19] == 'Z') {
-				tm.is_utc = true;
-				tm.year  = strict_stoul(&errno_save, datetime.substr(0, 4));
-				if (errno_save != 0) { return Format::ERROR; }
-				tm.mon   = strict_stoul(&errno_save, datetime.substr(5, 2));
-				if (errno_save != 0) { return Format::ERROR; }
-				tm.day   = strict_stoul(&errno_save, datetime.substr(8, 2));
-				if (errno_save != 0) { return Format::ERROR; }
-				if (isValidDate(tm.year, tm.mon, tm.day)) {
-					tm.hour = strict_stoul(&errno_save, datetime.substr(11, 2));
-					if (errno_save != 0) { return Format::ERROR; }
-					if (tm.hour < 24) {
-						tm.min = strict_stoul(&errno_save, datetime.substr(14, 2));
-						if (errno_save != 0) { return Format::ERROR; }
-						if (tm.min < 60) {
-							tm.sec = strict_stoul(&errno_save, datetime.substr(17, 2));
-							if (errno_save != 0) { return Format::ERROR; }
-							if (tm.sec < 60) {
-								tm.fsec = 0.0;
-								return Format::VALID;
-							}
-						}
-					}
-				}
-				return Format::OUT_OF_RANGE;
-			}
-			return Format::INVALID;
-		default: // 0000-00-00[T ]00:00:00[+-]00:00  0000-00-00[T ]00:00:00.0...  0000-00-00[T ]00:00:00.0...[+-]00:00
-			if (size > 20 && datetime[4] == '-' && datetime[7] == '-' && (datetime[10] == 'T' || datetime[10] == ' ') &&
-				datetime[13] == ':' && datetime[16] == ':') {
-				tm.year  = strict_stoul(&errno_save, datetime.substr(0, 4));
-				if (errno_save != 0) { return Format::ERROR; }
-				tm.mon   = strict_stoul(&errno_save, datetime.substr(5, 2));
-				if (errno_save != 0) { return Format::ERROR; }
-				tm.day   = strict_stoul(&errno_save, datetime.substr(8, 2));
-				if (errno_save != 0) { return Format::ERROR; }
-				if (isValidDate(tm.year, tm.mon, tm.day)) {
-					tm.hour = strict_stoul(&errno_save, datetime.substr(11, 2));
-					if (errno_save != 0) { return Format::ERROR; }
-					if (tm.hour < 24) {
-						tm.min = strict_stoul(&errno_save, datetime.substr(14, 2));
-						if (errno_save != 0) { return Format::ERROR; }
-						if (tm.min < 60) {
-							tm.sec = strict_stoul(&errno_save, datetime.substr(17, 2));
-							if (errno_save != 0) { return Format::ERROR; }
-							if (tm.sec < 60) {
-								switch (datetime[19]) {
-									case '+':
-									case '-':
-									    tm.is_utc = true;
-										if (size == 25 && datetime[22] == ':') {
-											tm.fsec = 0.0;
-											auto tz_h = datetime.substr(20, 2);
-											auto h = strict_stoul(&errno_save, tz_h);
-											if (errno_save != 0) { return Format::ERROR; }
-											if (h < 24) {
-												auto tz_m = datetime.substr(23, 2);
-												auto m = strict_stoul(&errno_save, tz_m);
-												if (errno_save != 0) { return Format::ERROR; }
-												if (m < 60) {
-													computeTimeZone(tm, datetime[19], tz_h, tz_m);
-													return Format::VALID;
-												}
-											}
-											return Format::OUT_OF_RANGE;
-										}
-										return Format::INVALID;
-									case '.': {
-										auto it = datetime.begin() + 19;
-										const auto it_e = datetime.end();
-										for (auto aux = it + 1; aux != it_e; ++aux) {
-											const auto& c = *aux;
-											if (c < '0' || c > '9') {
-												switch (c) {
-													case 'Z':
-														tm.is_utc = true;
-														if ((aux + 1) == it_e) {
-															auto fsec = strict_stod(&errno_save, std::string_view(it, aux - it));
-															if (errno_save != 0) { return Format::ERROR; }
-															tm.fsec = normalize_fsec(fsec);
-															return Format::VALID;
-														}
-														return Format::ERROR;
-													case '+':
-													case '-':
-														tm.is_utc = true;
-														if ((it_e - aux) == 6) {
-															auto aux_end = aux + 3;
-															if (*aux_end == ':') {
-																auto tz_h = std::string_view(aux + 1, aux_end - aux - 1);
-																auto h = strict_stoul(&errno_save, tz_h);
-																if (errno_save != 0) { return Format::ERROR; }
-																if (h < 24) {
-																	auto tz_m = std::string_view(aux_end + 1, it_e - aux_end - 1);
-																	auto m = strict_stoul(&errno_save, tz_m);
-																	if (errno_save != 0) { return Format::ERROR; }
-																	if (m < 60) {
-																		auto fsec = strict_stod(&errno_save, std::string_view(it, aux - it));
-																		if (errno_save != 0) { return Format::ERROR; }
-																		tm.fsec = normalize_fsec(fsec);
-																		computeTimeZone(tm, c, tz_h, tz_m);
-																		return Format::VALID;
-																	}
-																}
-																return Format::OUT_OF_RANGE;
-															}
-														}
-														return Format::INVALID;
-													default:
-														return Format::INVALID;
-												}
-											}
-										}
-										auto fsec = strict_stod(&errno_save, std::string_view(it, it_e - it));
-										if (errno_save != 0) { return Format::ERROR; }
-										tm.fsec = normalize_fsec(fsec);
-										return Format::VALID;
-									}
-									default:
-										return Format::INVALID;
-								}
-							}
-						}
-					}
-				}
-				return Format::OUT_OF_RANGE;
-			}
-			return Format::INVALID;
-	}
+	return iso8601_scan<true>(datetime, &tm);
 }
 
 
 Datetime::Format
 Datetime::Iso8601Parser(std::string_view datetime)
 {
-	int errno_save;
-	auto size = datetime.size();
-	switch (size) {
-		case 10: // 0000-00-00
-			if (datetime[4] == '-' && datetime[7] == '-') {
-				auto year  = strict_stoul(&errno_save, datetime.substr(0, 4));
-				if (errno_save != 0) { return Format::ERROR; }
-				auto mon   = strict_stoul(&errno_save, datetime.substr(5, 2));
-				if (errno_save != 0) { return Format::ERROR; }
-				auto day   = strict_stoul(&errno_save, datetime.substr(8, 2));
-				if (errno_save != 0) { return Format::ERROR; }
-				if (isValidDate(year, mon, day)) {
-					return Format::VALID;
-				}
-				return Format::OUT_OF_RANGE;
-			}
-			return Format::INVALID;
-		case 19: // 0000-00-00[T ]00:00:00
-			if (datetime[4] == '-' && datetime[7] == '-' && (datetime[10] == 'T' || datetime[10] == ' ') && datetime[13] == ':' && datetime[16] == ':') {
-				auto year  = strict_stoul(&errno_save, datetime.substr(0, 4));
-				if (errno_save != 0) { return Format::ERROR; }
-				auto mon   = strict_stoul(&errno_save, datetime.substr(5, 2));
-				if (errno_save != 0) { return Format::ERROR; }
-				auto day   = strict_stoul(&errno_save, datetime.substr(8, 2));
-				if (errno_save != 0) { return Format::ERROR; }
-				if (isValidDate(year, mon, day)) {
-					auto hour = strict_stoul(&errno_save, datetime.substr(11, 2));
-					if (errno_save != 0) { return Format::ERROR; }
-					if (hour < 24) {
-						auto min = strict_stoul(&errno_save, datetime.substr(14, 2));
-						if (errno_save != 0) { return Format::ERROR; }
-						if (min < 60) {
-							auto sec = strict_stoul(&errno_save, datetime.substr(17, 2));
-							if (errno_save != 0) { return Format::ERROR; }
-							if (sec < 60) {
-								return Format::VALID;
-							}
-						}
-					}
-				}
-				return Format::OUT_OF_RANGE;
-			}
-			return Format::INVALID;
-		case 20: // 0000-00-00[T ]00:00:00Z
-			if (datetime[4] == '-' && datetime[7] == '-' && (datetime[10] == 'T' || datetime[10] == ' ') && datetime[13] == ':' &&
-				datetime[16] == ':' && datetime[19] == 'Z') {
-				auto year  = strict_stoul(&errno_save, datetime.substr(0, 4));
-				if (errno_save != 0) { return Format::ERROR; }
-				auto mon   = strict_stoul(&errno_save, datetime.substr(5, 2));
-				if (errno_save != 0) { return Format::ERROR; }
-				auto day   = strict_stoul(&errno_save, datetime.substr(8, 2));
-				if (errno_save != 0) { return Format::ERROR; }
-				if (isValidDate(year, mon, day)) {
-					auto hour = strict_stoul(&errno_save, datetime.substr(11, 2));
-					if (errno_save != 0) { return Format::ERROR; }
-					if (hour < 24) {
-						auto min = strict_stoul(&errno_save, datetime.substr(14, 2));
-						if (errno_save != 0) { return Format::ERROR; }
-						if (min < 60) {
-							auto sec = strict_stoul(&errno_save, datetime.substr(17, 2));
-							if (errno_save != 0) { return Format::ERROR; }
-							if (sec < 60) {
-								return Format::VALID;
-							}
-						}
-					}
-				}
-				return Format::OUT_OF_RANGE;
-			}
-			return Format::INVALID;
-		default: // 0000-00-00[T ]00:00:00[+-]00:00  0000-00-00[T ]00:00:00.0...  0000-00-00[T ]00:00:00.0...[+-]00:00
-			if (size > 20 && datetime[4] == '-' && datetime[7] == '-' && (datetime[10] == 'T' || datetime[10] == ' ') &&
-				datetime[13] == ':' && datetime[16] == ':') {
-				auto year  = strict_stoul(&errno_save, datetime.substr(0, 4));
-				if (errno_save != 0) { return Format::ERROR; }
-				auto mon   = strict_stoul(&errno_save, datetime.substr(5, 2));
-				if (errno_save != 0) { return Format::ERROR; }
-				auto day   = strict_stoul(&errno_save, datetime.substr(8, 2));
-				if (errno_save != 0) { return Format::ERROR; }
-				if (isValidDate(year, mon, day)) {
-					auto hour = strict_stoul(&errno_save, datetime.substr(11, 2));
-					if (errno_save != 0) { return Format::ERROR; }
-					if (hour < 24) {
-						auto min = strict_stoul(&errno_save, datetime.substr(14, 2));
-						if (errno_save != 0) { return Format::ERROR; }
-						if (min < 60) {
-							auto sec = strict_stoul(&errno_save, datetime.substr(17, 2));
-							if (errno_save != 0) { return Format::ERROR; }
-							if (sec < 60) {
-								switch (datetime[19]) {
-									case '+':
-									case '-':
-										if (size == 25 && datetime[22] == ':') {
-											auto tz_h = datetime.substr(20, 2);
-											auto h = strict_stoul(&errno_save, tz_h);
-											if (errno_save != 0) { return Format::ERROR; }
-											if (h < 24) {
-												auto tz_m = datetime.substr(23, 2);
-												auto m = strict_stoul(&errno_save, tz_m);
-												if (errno_save != 0) { return Format::ERROR; }
-												if (m < 60) {
-													return Format::VALID;
-												}
-											}
-											return Format::OUT_OF_RANGE;
-										}
-										return Format::INVALID;
-									case '.': {
-										auto it = datetime.begin() + 19;
-										const auto it_e = datetime.end();
-										for (auto aux = it + 1; aux != it_e; ++aux) {
-											const auto& c = *aux;
-											if (c < '0' || c > '9') {
-												switch (c) {
-													case 'Z':
-														if ((aux + 1) == it_e) {
-															return Format::VALID;
-														}
-														return Format::ERROR;
-													case '+':
-													case '-':
-														if ((it_e - aux) == 6) {
-															auto aux_end = aux + 3;
-															if (*aux_end == ':') {
-																auto tz_h = std::string_view(aux + 1, aux_end - aux - 1);
-																auto h = strict_stoul(&errno_save, tz_h);
-																if (errno_save != 0) { return Format::ERROR; }
-																if (h < 24) {
-																	auto tz_m = std::string_view(aux_end + 1, it_e - aux_end - 1);
-																	auto m = strict_stoul(&errno_save, tz_m);
-																	if (errno_save != 0) { return Format::ERROR; }
-																	if (m < 60) {
-																		return Format::VALID;
-																	}
-																}
-																return Format::OUT_OF_RANGE;
-															}
-														}
-														return Format::INVALID;
-													default:
-														return Format::INVALID;
-												}
-											}
-										}
-										return Format::VALID;
-									}
-									default:
-										return Format::INVALID;
-								}
-							}
-						}
-					}
-				}
-				return Format::OUT_OF_RANGE;
-			}
-			return Format::INVALID;
-	}
+	return iso8601_scan<false>(datetime, nullptr);
 }
 
 
 void
 Datetime::processDateMath(std::string_view date_math, tm_t& tm)
 {
-	size_t size_match = 0;
-
-	std::cregex_iterator next(date_math.begin(), date_math.end(), date_math_re, std::regex_constants::match_continuous);
-	std::cregex_iterator end;
-	while (next != end) {
-		size_match += next->length(0);
-		computeDateMath(tm, next->str(1), next->str(2)[0]);
-		++next;
+	// Same grammar as date_math_re, matched contiguously from the start:
+	//   ( [+-][0-9]+ | /{1,2} ) [dyMwhms]
+	const char* p = date_math.data();
+	const std::size_t n = date_math.size();
+	std::size_t i = 0;
+	while (i < n) {
+		std::size_t j = i;
+		if (p[j] == '+' || p[j] == '-') {
+			const std::size_t d0 = ++j;
+			while (j < n && p[j] >= '0' && p[j] <= '9') { ++j; }
+			if (j == d0) { break; }
+		} else if (p[j] == '/') {
+			++j;
+			if (j < n && p[j] == '/') { ++j; }
+		} else {
+			break;
+		}
+		if (j >= n) { break; }
+		const char u = p[j];
+		if (u != 'd' && u != 'y' && u != 'M' && u != 'w' && u != 'h' && u != 'm' && u != 's') { break; }
+		computeDateMath(tm, date_math.substr(i, j - i), u);
+		i = j + 1;
 	}
 
-	if (date_math.size() != size_match) {
+	if (i != n) {
 		throw DatetimeError(std::format("Datetime Math ({}) is used incorrectly", date_math));
 	}
 }
 
 
-void
-Datetime::computeTimeZone(tm_t& tm, char op, std::string_view hour, std::string_view min)
-{
+// The original implementation: builds the two date-math operators as strings.
+// Kept for arguments the integer path does not cover.
+static void computeTimeZone_generic(Datetime::tm_t& tm, char op, std::string_view hour, std::string_view min) {
 	std::string oph, opm;
 	oph.reserve(3);
 	opm.reserve(3);
@@ -543,8 +665,57 @@ Datetime::computeTimeZone(tm_t& tm, char op, std::string_view hour, std::string_
 		opm.push_back('+');
 		opm.append(min.data(), min.size());
 	}
-	computeDateMath(tm, oph, 'h');
-	computeDateMath(tm, opm, 'm');
+	Datetime::computeDateMath(tm, oph, 'h');
+	Datetime::computeDateMath(tm, opm, 'm');
+}
+
+
+void
+Datetime::computeTimeZone(tm_t& tm, char op, std::string_view hour, std::string_view min)
+{
+	auto digits = [](std::string_view s, int& v) {
+		if (s.empty() || s.size() > 2) { return false; }
+		v = 0;
+		for (char c : s) {
+			if (c < '0' || c > '9') { return false; }
+			v = v * 10 + (c - '0');
+		}
+		return true;
+	};
+	int h, m;
+	if (tm.year >= 1 && tm.mon >= 1 && tm.mon <= 12 && digits(hour, h) && digits(min, m)) {
+		apply_tz(tm, op, h, m, tm.day >= 1 && tm.day <= 28);
+		return;
+	}
+	computeTimeZone_generic(tm, op, hour, min);
+}
+
+
+
+
+// What strict_stoi(str) accepted: strtol grammar (leading isspace, sign, digits)
+// consuming the whole string, at most 63 chars, result within int.
+static bool parse_int(std::string_view s, int& out) {
+	const std::size_t n = s.size();
+	if (n == 0 || n > 63) { return false; }
+	std::size_t i = 0;
+	while (i < n && std::isspace(static_cast<unsigned char>(s[i]))) { ++i; }
+	bool neg = false;
+	if (i < n && (s[i] == '+' || s[i] == '-')) {
+		neg = s[i] == '-';
+		++i;
+	}
+	const std::size_t first = i;
+	std::int64_t acc = 0;
+	while (i < n && s[i] >= '0' && s[i] <= '9') {
+		acc = std::min<std::int64_t>(acc * 10 + (s[i] - '0'), std::int64_t{1} << 40);  // saturate: out of int range anyway
+		++i;
+	}
+	if (i == first || i != n) { return false; }
+	if (neg) { acc = -acc; }
+	if (acc < INT_MIN || acc > INT_MAX) { return false; }
+	out = static_cast<int>(acc);
+	return true;
 }
 
 
@@ -556,11 +727,10 @@ Datetime::computeTimeZone(tm_t& tm, char op, std::string_view hour, std::string_
 void
 Datetime::computeDateMath(tm_t& tm, std::string_view op, char unit)
 {
-	int errno_save;
+	int num;
 	switch (op[0]) {
 		case '+': {
-			auto num = strict_stoi(&errno_save, op.substr(1));
-			if (errno_save != 0) {
+			if (!parse_int(op.substr(1), num)) {
 				throw DatetimeError(std::format("Invalid format in Datetime Math unit: '{}'. '{}' must be numeric", unit, op.substr(1)));
 			}
 			switch (unit) {
@@ -589,8 +759,7 @@ Datetime::computeDateMath(tm_t& tm, std::string_view op, char unit)
 			break;
 		}
 		case '-': {
-			auto num = strict_stoi(&errno_save, op.substr(1));
-			if (errno_save != 0) {
+			if (!parse_int(op.substr(1), num)) {
 				throw DatetimeError(std::format("Invalid format in Datetime Math unit: '{}'. '{}' must be numeric", unit, op.substr(1)));
 			}
 			switch (unit) {
@@ -651,16 +820,16 @@ Datetime::computeDateMath(tm_t& tm, std::string_view op, char unit)
 					}
 					break;
 				case 'w': {
-					auto dateGMT = timegm(tm);
-					struct tm timeinfo;
-					gmtime_r(&dateGMT, &timeinfo);
+					std::int64_t y;
+					int mo, d, h, mi, s, wday;
+					civil_from_secs(timegm(tm), y, mo, d, h, mi, s, &wday);
 					if (op.size() == 1) {
-						tm.day += 6 - timeinfo.tm_wday;
+						tm.day += 6 - wday;
 						tm.hour = 23;
 						tm.min = tm.sec = 59;
 						tm.fsec = DATETIME_MAX_FSEC;
 					} else if (op.size() == 2 && op[1] == '/') {
-						tm.day -= timeinfo.tm_wday;
+						tm.day -= wday;
 						tm.hour = tm.min = tm.sec = 0;
 						tm.fsec = 0.0;
 					} else {
@@ -718,15 +887,7 @@ Datetime::computeDateMath(tm_t& tm, std::string_view op, char unit)
 	}
 
 	// Update datetime.
-	auto dateGMT = timegm(tm);
-	struct tm timeinfo;
-	gmtime_r(&dateGMT, &timeinfo);
-	tm.year = timeinfo.tm_year + DATETIME_START_YEAR;
-	tm.mon = timeinfo.tm_mon + 1;
-	tm.day = timeinfo.tm_mday;
-	tm.hour = timeinfo.tm_hour;
-	tm.min = timeinfo.tm_min;
-	tm.sec = timeinfo.tm_sec;
+	set_from_secs(tm, timegm(tm));
 }
 
 
@@ -855,13 +1016,10 @@ Datetime::timegm(tm_t& tm)
 Datetime::tm_t
 Datetime::to_tm_t(std::time_t timestamp)
 {
-	struct tm timeinfo;
-	gmtime_r(&timestamp, &timeinfo);
-	return {
-		timeinfo.tm_year + DATETIME_START_YEAR, timeinfo.tm_mon + 1,
-		timeinfo.tm_mday, timeinfo.tm_hour, timeinfo.tm_min,
-		timeinfo.tm_sec
-	};
+	std::int64_t y;
+	int mon, day, hour, min, sec;
+	civil_from_secs(timestamp, y, mon, day, hour, min, sec);
+	return { static_cast<int>(y), mon, day, hour, min, sec };
 }
 
 
@@ -872,13 +1030,10 @@ Datetime::tm_t
 Datetime::to_tm_t(double timestamp)
 {
 	auto _time = static_cast<std::time_t>(timestamp);
-	struct tm timeinfo;
-	gmtime_r(&_time, &timeinfo);
-	return {
-		timeinfo.tm_year + DATETIME_START_YEAR, timeinfo.tm_mon + 1,
-		timeinfo.tm_mday, timeinfo.tm_hour, timeinfo.tm_min,
-		timeinfo.tm_sec, normalize_fsec(timestamp - _time)
-	};
+	std::int64_t y;
+	int mon, day, hour, min, sec;
+	civil_from_secs(_time, y, mon, day, hour, min, sec);
+	return { static_cast<int>(y), mon, day, hour, min, sec, normalize_fsec(timestamp - _time) };
 }
 
 
@@ -929,26 +1084,67 @@ Datetime::isValidDate(int year, int month, int day)
 /*
  * Return a string with the datetime in ISO 8601 Format.
  */
+static inline char*
+put_int(char* o, std::int64_t v, int width)
+{
+	// Same output as std::format("{:0<width>}", v): the sign counts toward the width.
+	if (v >= 0 && v < 100 && width == 2) {
+		*o++ = static_cast<char>('0' + v / 10);
+		*o++ = static_cast<char>('0' + v % 10);
+		return o;
+	}
+	std::uint64_t u;
+	if (v < 0) {
+		*o++ = '-';
+		--width;
+		u = 0 - static_cast<std::uint64_t>(v);
+	} else {
+		u = static_cast<std::uint64_t>(v);
+	}
+	char tmp[24];
+	int n = 0;
+	do {
+		tmp[n++] = static_cast<char>('0' + u % 10);
+		u /= 10;
+	} while (u);
+	while (n < width) { tmp[n++] = '0'; }
+	while (n) { *o++ = tmp[--n]; }
+	return o;
+}
+
+static inline char*
+put_date_time(char* o, std::int64_t year, int mon, int day, char sep, int hour, int min, int sec)
+{
+	o = put_int(o, year, 4);
+	*o++ = '-';
+	o = put_int(o, mon, 2);
+	*o++ = '-';
+	o = put_int(o, day, 2);
+	*o++ = sep;
+	o = put_int(o, hour, 2);
+	*o++ = ':';
+	o = put_int(o, min, 2);
+	*o++ = ':';
+	return put_int(o, sec, 2);
+}
+
 std::string
 Datetime::iso8601(const std::tm& tm, bool trim, char sep)
 {
-	if (trim) {
-		return std::format("{:04}-{:02}-{:02}{}{:02}:{:02}:{:02}",
-			tm.tm_year + DATETIME_START_YEAR, tm.tm_mon + 1, tm.tm_mday,
-			sep, tm.tm_hour, tm.tm_min, tm.tm_sec);
+	char buf[160];
+	char* o = put_date_time(buf, std::int64_t{tm.tm_year} + DATETIME_START_YEAR, tm.tm_mon + 1, tm.tm_mday, sep, tm.tm_hour, tm.tm_min, tm.tm_sec);
+	if (!trim) {
+		std::memcpy(o, ".000000", 7);
+		o += 7;
 	}
-
-	return std::format("{:04}-{:02}-{:02}{}{:02}:{:02}:{:02}.000000",
-		tm.tm_year + DATETIME_START_YEAR, tm.tm_mon + 1, tm.tm_mday,
-		sep, tm.tm_hour, tm.tm_min, tm.tm_sec);
+	return std::string(buf, static_cast<std::size_t>(o - buf));
 }
 
 
-/*
- * Return a string with the datetime in ISO 8601 Format.
- */
-std::string
-Datetime::iso8601(const tm_t& tm, bool trim, char sep)
+// The original std::format based writer. Used for fractions the integer
+// writer does not cover (>= 1 or not finite), where {:.6f} prints extra digits.
+static std::string
+iso8601_generic(const Datetime::tm_t& tm, bool trim, char sep)
 {
 	if (trim) {
 		auto res = std::format("{:04}-{:02}-{:02}{}{:02}:{:02}:{:02}{}",
@@ -990,6 +1186,72 @@ Datetime::iso8601(const tm_t& tm, bool trim, char sep)
 }
 
 
+#ifdef __SIZEOF_INT128__
+// Microseconds of 0 < f < 1 as std::format("{:.6f}") rounds them: the exact
+// binary value, ties to even. f = M * 2^-s exactly, so the product with 1e6 is
+// an integer-and-remainder problem in 128 bits (no double rounding).
+static inline unsigned
+fsec_micros(double f)
+{
+	const auto bits = std::bit_cast<std::uint64_t>(f);
+	const auto exp = static_cast<int>(bits >> 52);
+	std::uint64_t mant = bits & ((std::uint64_t{1} << 52) - 1);
+	int shift;
+	if (exp == 0) {
+		shift = 1074;
+	} else {
+		mant |= std::uint64_t{1} << 52;
+		shift = 1075 - exp;
+	}
+	if (shift >= 128) { return 0; }
+	using u128 = unsigned __int128;
+	const u128 prod = u128{mant} * 1000000u;
+	u128 q = prod >> shift;
+	const u128 rem = prod - (q << shift);
+	const u128 half = u128{1} << (shift - 1);
+	if (rem > half || (rem == half && (q & 1))) { ++q; }
+	return static_cast<unsigned>(q);
+}
+#endif
+
+
+/*
+ * Return a string with the datetime in ISO 8601 Format.
+ */
+std::string
+Datetime::iso8601(const tm_t& tm, bool trim, char sep)
+{
+#ifdef __SIZEOF_INT128__
+	const bool frac = tm.fsec > 0.0;
+	if (!frac || tm.fsec < 1.0) {
+		char buf[160];
+		char* o = put_date_time(buf, tm.year, tm.mon, tm.day, sep, tm.hour, tm.min, tm.sec);
+		if (frac) {
+			const unsigned micro = fsec_micros(tm.fsec) % 1000000;  // 1.000000 prints as ".000000"
+			char d[6];
+			unsigned v = micro;
+			for (int i = 5; i >= 0; --i) { d[i] = static_cast<char>('0' + v % 10); v /= 10; }
+			int n = 6;
+			if (trim) {
+				while (n > 0 && d[n - 1] == '0') { --n; }
+			}
+			if (n > 0) {
+				*o++ = '.';
+				std::memcpy(o, d, static_cast<std::size_t>(n));
+				o += n;
+			}
+		} else if (!trim) {
+			std::memcpy(o, ".000000", 7);
+			o += 7;
+		}
+		if (tm.is_utc) { *o++ = 'Z'; }
+		return std::string(buf, static_cast<std::size_t>(o - buf));
+	}
+#endif
+	return iso8601_generic(tm, trim, sep);
+}
+
+
 /*
  * Transforms a timestamp in seconds with decimal fraction to ISO 8601 format.
  */
@@ -1014,21 +1276,16 @@ Datetime::iso8601(std::chrono::system_clock::time_point tp, bool trim, char sep)
 bool
 Datetime::isDate(std::string_view date)
 {
-	int errno_save;
 	auto size = date.size();
 	switch (size) {
 		case 10: // 0000-00-00
 			if (date[4] == '-' && date[7] == '-') {
-				auto year  = strict_stoul(&errno_save, date.substr(0, 4));
-				if (errno_save != 0) { return false; }
-				auto mon   = strict_stoul(&errno_save, date.substr(5, 2));
-				if (errno_save != 0) { return false; }
-				auto day   = strict_stoul(&errno_save, date.substr(8, 2));
-				if (errno_save != 0) { return false; }
-				if (isValidDate(year, mon, day)) {
-					return true;
-				}
-				return false;
+				int year, mon, day;
+				bool w;
+				if (!field(date.data(), 4, year, w)) { return false; }
+				if (!field(date.data() + 5, 2, mon, w)) { return false; }
+				if (!field(date.data() + 8, 2, day, w)) { return false; }
+				return isValidDate(year, mon, day);
 			}
 			[[fallthrough]];
 		default:
@@ -1045,8 +1302,8 @@ Datetime::isDatetime(std::string_view datetime)
 		case Format::VALID:
 			return true;
 		case Format::INVALID: {
-			std::cmatch m;
-			return std::regex_match(datetime.begin(), datetime.end(), m, date_re) && static_cast<std::size_t>(m.length(0)) == datetime.size();
+			DateReMatch m;
+			return scan_date_re(datetime, m);
 		}
 		default:
 			return false;

@@ -79,6 +79,19 @@ cmake -B build && cmake --build build && ctest --test-dir build
 ./build/datetime_demo
 ```
 
+## ⚡ How it is fast
+
+Parsing and formatting avoid per-field library calls and allocations: fixed-width
+digits are read directly, fractions up to 6 digits are integer microseconds, a
+UTC offset is one integer add, the loose formats (`2020/01/02 3:04`) and
+`|| date math` use hand scanners instead of `std::regex`, `iso8601` writes digits
+into a stack buffer (fractions rounded exactly, ties to even, like `{:.6f}`), and
+`to_tm_t` uses an integer civil-from-days conversion instead of `gmtime_r`.
+Results are identical to the earlier implementation on every input, accepted or
+rejected (`ctest` runs a differential test against a frozen copy). Typical
+speedups on one core: ISO parse 5-9x, loose format ~80x, date math ~15x,
+`iso8601` ~9x, `to_tm_t` ~5x. Run `-DDATETIME_BUILD_BENCH=ON` for the numbers.
+
 ## 🤝 Contributing
 
 Issues and pull requests are welcome. Read [AGENTS.md](AGENTS.md) first. CI must

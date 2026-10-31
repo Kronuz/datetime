@@ -25,25 +25,36 @@ that does the work in two stages:
    scanner keyed on the string length (10 = date, 19 = date+time, 20 = `...Z`,
    else offset/fractional). It returns a `Format` enum (`VALID` / `INVALID` /
    `OUT_OF_RANGE` / `ERROR`) rather than throwing, so the caller can fall through
-   to the slow path on `INVALID`. There are two overloads: one fills a `tm_t`,
-   one only validates (used by `isDatetime`).
-2. **Regex fallback** (`date_re`). A single big `std::regex` that also captures
-   the `|| <date math>` suffix. Only reached when the fast path says `INVALID`,
-   which mostly means a non-`T`/non-`-` separator style.
+   to the slow path on `INVALID`. There are two overloads, one function
+   template (`iso8601_scan<Fill>`): one fills a `tm_t`, one only validates (used
+   by `isDatetime`). Fixed-width fields are read as plain digits; any other byte
+   takes an exact emulation of the `strtoul` grammar the original used (leading
+   whitespace, a sign), so odd fields such as `"+5"` or `" 5"` still parse. The
+   two overloads keep the original's differences (negative hour/min/sec compare
+   as `int` when filling and as `unsigned long` when validating; the validating
+   one never parses the fraction); see the quirk list in `test/diff_test.cc`.
+2. **Loose-format scanner** (`scan_date_re`). A hand scanner for the grammar of
+   `date_re` (`/`, space or no separator, 1-digit hours, `,` fractions, spaced
+   offsets) that also captures the `|| <date math>` suffix. Only reached when the
+   fast path says `INVALID`. `date_re` and `date_math_re` stay exported for
+   ABI/API compatibility but nothing in the library uses them.
 
 If the string contains `||`, the part before it is parsed as a datetime and the
 part after is fed to `processDateMath`.
 
 ### Date math
 
-`processDateMath` walks `date_math_re` (`([+-]\d+|/{1,2})([dyMwhms])`) with a
-`match_continuous` iterator and calls `computeDateMath` per term. `+N`/`-N` add or
+`processDateMath` scans the grammar of `date_math_re`
+(`([+-]\d+|/{1,2})([dyMwhms])`) contiguously and calls `computeDateMath` per term. `+N`/`-N` add or
 subtract; `/unit` rounds *up* to the end of the unit (e.g. `/M` -> last day,
 23:59:59.999999); `//unit` rounds *down* to the start. After each operation the
-`tm_t` is renormalized by round-tripping through `timegm` + `gmtime_r`, so
-overflow (e.g. day 32) carries correctly. `computeTimeZone` is implemented on top
-of `computeDateMath`: an offset of `+05:30` is applied as `-5h -30m` of date math
-to convert the wall-clock value to the UTC instant.
+`tm_t` is renormalized by round-tripping through `timegm` and an integer
+civil-from-days conversion, so overflow (e.g. day 32) carries correctly.
+`computeTimeZone` of `+05:30` means `-5h -30m` of date math (the wall-clock value
+becomes the UTC instant); the parsers apply it as one integer sum with the same
+results, including the original's `Year is out of range` throw when the first
+step leaves year 0. Offsets the integer path does not cover still run through
+`computeDateMath`.
 
 `Time` and `Timedelta` use their own length-keyed scanners
 (`TimeParser` / `TimedeltaParser`), not the regex.
@@ -52,7 +63,8 @@ to convert the wall-clock value to the UTC instant.
 
 `toordinal` computes a proleptic Gregorian day number; `timegm` /
 `timestamp(tm_t)` build a Unix timestamp from it (valid only for year > 0, which
-is the library's domain); `to_tm_t` goes the other way via `gmtime_r`. Leap-year
+is the library's domain); `to_tm_t` goes the other way with an integer civil-from-days conversion (floor
+semantics, no libc time-zone state). Leap-year
 and days-in-month logic lives in `isleapYear` / `getDays_month` with two static
 `days` / `cumdays` tables.
 
@@ -88,22 +100,21 @@ made during extraction, all behavior-preserving except where noted:
 
 ## Dependencies
 
-- **strict-stox** (header-only, FetchContent). Every number pulled out of a
-  date/time string goes through `strict_stoi` / `strict_stoul` / `strict_stod`,
-  whose nothrow `errno_save` variant is what lets the scanners report a bad field
-  without throwing mid-parse. This is the library's only third-party dependency.
+- **strict-stox** (header-only, FetchContent). Fractions longer than 6 digits
+  and the time/timedelta parsers still use `strict_stod` / `strict_stoul`; the
+  datetime date/time fields are read directly. This is the library's only third-party dependency.
 - **No hashes / phf.** The perfect-hash table was MsgPack-key dispatch in the
   glue half. The pure core does not hash anything, so `hashes` is *not* a
   dependency here (unlike some sibling extractions).
-- Standard library: `<regex>`, `<format>`, `<chrono>`, `<ctime>`.
+- Standard library: `<regex>` (only for the exported `date_re` objects), `<format>`, `<chrono>`, `<ctime>`.
 
 ## Trade-offs
 
-- The fast ISO 8601 path duplicates a lot of structure across length cases and
-  across the two overloads; it is verbose but allocation-free and is the common
-  path. The regex is the catch-all for the less common separator styles and for
-  capturing the date-math suffix.
+- The ISO 8601 scanner is one template for both overloads, so they cannot drift
+  apart; `test/diff_test.cc` compares every entry point against a frozen copy of
+  the original (`test/old/`) on random, mutated and exhaustively byte-mutated
+  inputs. The loose-format scanner is the catch-all for the less common
+  separator styles and the date-math suffix.
 - `timestamp` / `timegm` are only correct for year > 0 (proleptic Gregorian from
   year 1). That is the documented domain; `isValidDate` rejects year < 1.
-- Inputs are parsed against the host's `gmtime_r`; the library assumes a 64-bit
-  `time_t` for the full datetime range.
+- The library assumes a 64-bit `time_t` for the full datetime range.

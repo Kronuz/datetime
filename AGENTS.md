@@ -9,6 +9,9 @@ how to build and test, the invariants you must not break, and the traps.
 ```
 datetime.h                   Datetime namespace API: tm_t / clk_t / Format, the parsers/formatters, DatetimeError hierarchy. Header.
 datetime.cc                  The pure-core implementation: ISO 8601 + date-math + time + timedelta parsing/formatting. Compiled.
+test/diff_test.cc            Differential test against the frozen original in test/old/ (CTest `datetime_diff`).
+test/old/                    Frozen pre-rewrite datetime.h/.cc, namespace DatetimeOld. Do not edit.
+bench/bench.cc               Old-vs-new benchmark (-DDATETIME_BUILD_BENCH=ON).
 test/test.cc                 Runnable smoke test: ISO parses, date math, timestamp round-trip, time/timedelta, throwing paths, predicates.
 CMakeLists.txt               STATIC library `datetime` (+ alias datetime::datetime); FetchContents strict-stox; CTest test `datetime`.
 LICENSE                      MIT, Copyright (c) 2015-2019 Dubalu LLC.
@@ -53,15 +56,20 @@ Expected output ends with `all datetime tests passed`, exit 0. The test target i
   (datetime/date-math -> `DatetimeError`, time -> `TimeError`, timedelta ->
   `TimedeltaError`).
 - **`Iso8601Parser` returns a `Format`, it does not throw.** The `INVALID` case
-  is load-bearing: `process_date_datetime` falls through to the regex on
-  `INVALID`. If you make it throw, the regex fallback dies.
+  is load-bearing: `process_date_datetime` falls through to the loose-format
+  scanner (`scan_date_re`) on `INVALID`. If you make it throw, that fallback dies.
 - **Date-math rounding direction.** `/unit` rounds *up* (end of unit, fsec =
   `DATETIME_MAX_FSEC`); `//unit` rounds *down* (start of unit, fsec 0). The test
   pins both; keep them straight.
-- **`strict_*` nothrow variant drives the scanners.** The hand-written ISO/time
-  scanners call `strict_stoul(&errno_save, ...)` and branch on `errno_save`
-  rather than catching. Keep using the nothrow overload inside the scanners; the
-  throwing overload would change control flow.
+- **Behavior is pinned to the original, quirks included.** `test/old/` is a frozen
+  copy of the pre-rewrite implementation (namespace `DatetimeOld`) and
+  `datetime_diff_test` compares every parser/formatter against it. Date fields
+  are read by `field()`, which emulates the old `strict_stoul` grammar (so
+  `"-1"` as an hour is accepted by the filling parser, rejected by the validating
+  one; `Z` after a loose-format time throws). Keep the differential test green;
+  do not "fix" a quirk without an owner decision.
+- **`strict_*` nothrow variant** is still used for fractions over 6 digits and by
+  the time/timedelta scanners; branch on `errno_save` rather than catching.
 - **Year > 0 domain.** `timegm` / `timestamp` / `toordinal` are proleptic
   Gregorian from year 1; `isValidDate` rejects year < 1. Don't feed year 0.
 
@@ -69,7 +77,7 @@ Expected output ends with `all datetime tests passed`, exit 0. The test target i
 
 - **Add a format/unit.** Extend the relevant length case in `Iso8601Parser` (both
   overloads) or a `computeDateMath` unit. Keep the nothrow `strict_*` + branch
-  pattern and renormalize via `timegm`/`gmtime_r` after a math op.
+  pattern and renormalize via `timegm` + `set_from_secs` after a math op.
 - **Always extend the smoke test.** `test/test.cc` is the only executable check.
   Cover the new happy path and at least one malformed input that must throw.
 

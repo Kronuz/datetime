@@ -227,7 +227,49 @@ static void test_predicates() {
 }
 
 
+// ---------------------------------------------------------------------------
+// Correctness fixes: both ISO overloads agree, loose Z is UTC, date math is
+// 64-bit with a year range. (Exhaustive and oracle checks: diff_test.cc and
+// datemath_test.cc.)
+// ---------------------------------------------------------------------------
+static void test_fixed_behaviors() {
+	using Datetime::Format;
+	// Negative hour/min/sec: out of range in both overloads.
+	for (const char* s : { "2020-01-02T-3:04:05", "2020-01-02T03:-4:05", "2020-01-02T03:04:-5" }) {
+		Datetime::tm_t tm;
+		assert(Datetime::Iso8601Parser(std::string_view(s), tm) == Format::OUT_OF_RANGE);
+		assert(Datetime::Iso8601Parser(std::string_view(s)) == Format::OUT_OF_RANGE);
+		assert(!Datetime::isDatetime(s));
+	}
+	// A fraction dot with no digits is an error in both overloads.
+	for (const char* s : { "2020-01-02T03:04:05.", "2020-01-02T03:04:05.Z", "2020-01-02T03:04:05.+01:00" }) {
+		Datetime::tm_t tm;
+		assert(Datetime::Iso8601Parser(std::string_view(s), tm) == Format::ERROR);
+		assert(Datetime::Iso8601Parser(std::string_view(s)) == Format::ERROR);
+		assert(!Datetime::isDatetime(s));
+	}
+	// Loose format ending in Z is UTC, like the ISO path.
+	auto z = Datetime::DatetimeParser(std::string_view("2020/01/02 03:04:05Z"));
+	assert(z.year == 2020 && z.mon == 1 && z.day == 2 && z.hour == 3 && z.min == 4 && z.sec == 5 && z.is_utc);
+	auto zm = Datetime::DatetimeParser(std::string_view("2020/01/02 3:04Z||+1d"));
+	assert(zm.day == 3 && zm.hour == 3 && zm.is_utc);
+	// Year 1 with an offset before 0001-01-01 stays an error.
+	bool threw = false;
+	try { Datetime::DatetimeParser(std::string_view("0001-01-01T00:00:00+05:00")); } catch (const DatetimeError&) { threw = true; }
+	assert(threw);
+	// Huge date-math terms are 64-bit: a result in range is exact, beyond the years an error.
+	auto big = Datetime::DatetimeParser(std::string_view("2020-01-01||+2147483647s"));
+	assert(big.year == 2088 && big.mon == 1 && big.day == 19);
+	threw = false;
+	try { Datetime::DatetimeParser(std::string_view("2020-01-01||+2147483647y")); } catch (const DatetimeError&) { threw = true; }
+	assert(threw);
+
+	std::printf("datetime fixed behaviors OK\n");
+}
+
+
 int main() {
+	test_fixed_behaviors();
 	test_iso8601_parse();
 	test_date_math();
 	test_timestamp_roundtrip();

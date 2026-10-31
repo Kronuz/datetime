@@ -51,6 +51,12 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(datetime_diff_test PRIVATE datetime)
   add_test(NAME datetime_diff COMMAND datetime_diff_test 20000)
 
+  # Exhaustive years 1..9999 and huge date-math terms against independent
+  # references (brute-force day counter, days-from-civil in 128-bit).
+  add_executable(datetime_datemath_test test/datemath_test.cc)
+  target_link_libraries(datetime_datemath_test PRIVATE datetime)
+  add_test(NAME datetime_datemath COMMAND datetime_datemath_test 20000)
+
   # Benchmark against the frozen original (no external comparators needed):
   #   cmake -B build -DDATETIME_BUILD_BENCH=ON -DCMAKE_BUILD_TYPE=Release
   option(DATETIME_BUILD_BENCH "Build the old-vs-new benchmark" OFF)

@@ -30,9 +30,11 @@ that does the work in two stages:
    by `isDatetime`). Fixed-width fields are read as plain digits; any other byte
    takes an exact emulation of the `strtoul` grammar the original used (leading
    whitespace, a sign), so odd fields such as `"+5"` or `" 5"` still parse. The
-   two overloads keep the original's differences (negative hour/min/sec compare
-   as `int` when filling and as `unsigned long` when validating; the validating
-   one never parses the fraction); see the quirk list in `test/diff_test.cc`.
+   two overloads run every check (a negative or out-of-range field is
+   `OUT_OF_RANGE`; a fraction dot needs 1 to 62 digits, else `ERROR`) and differ
+   only in whether they write the `tm_t`, so they return the same `Format` for
+   every input. The classes where this differs from the original are listed in
+   `test/diff_test.cc`.
 2. **Loose-format scanner** (`scan_date_re`). A hand scanner for the grammar of
    `date_re` (`/`, space or no separator, 1-digit hours, `,` fractions, spaced
    offsets) that also captures the `|| <date math>` suffix. Only reached when the
@@ -49,7 +51,10 @@ part after is fed to `processDateMath`.
 subtract; `/unit` rounds *up* to the end of the unit (e.g. `/M` -> last day,
 23:59:59.999999); `//unit` rounds *down* to the start. After each operation the
 `tm_t` is renormalized by round-tripping through `timegm` and an integer
-civil-from-days conversion, so overflow (e.g. day 32) carries correctly.
+civil-from-days conversion, so overflow (e.g. day 32) carries correctly. A
+`+N`/`-N` term is applied in 64-bit arithmetic (`|N| <= 2^31`, so no step can
+overflow); the supported years are 1 to `INT_MAX`, and a step that leaves them
+throws `DatetimeError("Year is out of range")`.
 `computeTimeZone` of `+05:30` means `-5h -30m` of date math (the wall-clock value
 becomes the UTC instant); the parsers apply it as one integer sum with the same
 results, including the original's `Year is out of range` throw when the first

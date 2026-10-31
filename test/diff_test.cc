@@ -7,19 +7,34 @@
 // including the partial writes left by a failing parse), exception message,
 // and formatted strings.
 //
-// Quirks of the original that are preserved on purpose (candidates for owner
-// decisions, not fixed here):
-//  - Iso8601Parser(str, tm) accepts a negative hour/min/sec field such as "-1"
-//    (compared as int) while Iso8601Parser(str) and isDatetime reject it
-//    (unsigned long compare), so the two disagree on those inputs.
-//  - Iso8601Parser(str) never parses the fraction: "...:05.Z" and a 63+ digit
-//    fraction are VALID there but ERROR in the filling overload.
+// Deliberate differences from the original (owner-authorized correctness fixes).
+// Each one is an explicit input class; outside the classes old == new is
+// enforced completely (verdicts, every tm_t field, exception text, formats):
+//  1. Negative hour/min/sec ("2020-01-02T-3:04:05"): the filling overload
+//     Iso8601Parser(str, tm) accepted it, the validating one rejected it.
+//     Now both return OUT_OF_RANGE.
+//  2. A fraction dot with no digits ("...:05.", "...:05.Z") or with more digits
+//     than strict_stod reads (63+): the validating overload accepted it, the
+//     filling one returned ERROR. Now both return ERROR.
+//  3. Loose-format strings ending in Z ("2020/01/02 03:04:05Z") always threw
+//     "Invalid format in Datetime Math unit: 'h'. '' must be numeric". Now Z is
+//     UTC (is_utc = true), as on the ISO path.
+//  4. computeDateMath overflowed int on huge +N terms (UB in the original):
+//     now 64-bit with a "Year is out of range" error. The frozen copy cannot be
+//     run on those inputs, so test/datemath_test.cc checks them against a
+//     days-from-civil reference instead, and overflow_prone() skips them here.
+// The oracle for 1 and 2 is ref_iso() below, a reference verdict written from
+// the grammar; it is cross-checked against the original everywhere the two
+// agree, and against both new overloads everywhere. The oracle for 3 is the
+// original parsing the same string with "+00:00" instead of "Z", plus is_utc.
+//
+// Still preserved on purpose:
 //  - Fields accept strtoul's leading whitespace and sign ("+5", " 5").
-//  - Loose-format strings ending in Z ("2020/01/02 03:04:05Z") always throw
-//    "Invalid format in Datetime Math unit: 'h'. '' must be numeric".
 //  - Iso8601Parser can throw ("Year is out of range") for year 1 with an offset
-//    that moves the instant before 0001-01-01, despite returning a Format.
-//  - computeDateMath overflows int on huge +N (UB in both implementations).
+//    that moves the instant before 0001-01-01, despite returning a Format. That
+//    is legitimate: the instant is outside the supported years.
+//  - "+12M" from December (and any month sum that is a multiple of 12 above 12)
+//    throws "Month must be in 1..12" (normalizeMonths yields month 0).
 //
 // Usage: datetime_diff_test [iterations [seed]]   (default 300000 per random family)
 #include <bit>
@@ -136,23 +151,157 @@ static bool overflow_prone(const std::string& s) {
 	return false;
 }
 
+using Fmt = Datetime::Format;
+
+// Reference ISO 8601 verdict, from the grammar (shape keyed on the length, as
+// the documented formats are):
+//   YYYY-MM-DD | YYYY-MM-DD(T| )hh:mm:ss[Z | .f+[Z|+hh:mm|-hh:mm] | +hh:mm | -hh:mm]
+// A field is strtoul-style (optional whitespace and sign, then digits only).
+// Every field must be in range (a negative one is out of range) and a
+// fraction needs 1..62 digits (the most strict_stod reads).
+static bool ref_field(std::string_view s, std::size_t pos, std::size_t n, int& v) {
+	std::size_t i = pos, end = pos + n;
+	while (i < end && (s[i] == ' ' || (s[i] >= '\t' && s[i] <= '\r'))) { ++i; }
+	int sign = 1;
+	if (i < end && (s[i] == '+' || s[i] == '-')) { sign = s[i] == '-' ? -1 : 1; ++i; }
+	if (i == end) { return false; }
+	int acc = 0;
+	for (; i < end; ++i) {
+		if (s[i] < '0' || s[i] > '9') { return false; }
+		acc = acc * 10 + (s[i] - '0');
+	}
+	v = sign * acc;
+	return true;
+}
+
+static bool ref_leap(int y) { return y % 4 == 0 && (y % 100 != 0 || y % 400 == 0); }
+
+static Fmt ref_iso(std::string_view s) {
+	const std::size_t n = s.size();
+	if (n != 10 && n < 19) { return Fmt::INVALID; }
+	if (s[4] != '-' || s[7] != '-') { return Fmt::INVALID; }
+	if (n > 10 && ((s[10] != 'T' && s[10] != ' ') || s[13] != ':' || s[16] != ':')) { return Fmt::INVALID; }
+	if (n == 20 && s[19] != 'Z') { return Fmt::INVALID; }
+	int Y, M, D;
+	if (!ref_field(s, 0, 4, Y) || !ref_field(s, 5, 2, M) || !ref_field(s, 8, 2, D)) { return Fmt::ERROR; }
+	static const int dim[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+	if (Y < 1 || M < 1 || M > 12 || D < 1 || D > dim[M - 1] + (M == 2 && ref_leap(Y))) { return Fmt::OUT_OF_RANGE; }
+	if (n == 10) { return Fmt::VALID; }
+	const std::size_t pos[] = { 11, 14, 17 };
+	const int limit[] = { 24, 60, 60 };
+	for (int k = 0; k < 3; ++k) {
+		int v;
+		if (!ref_field(s, pos[k], 2, v)) { return Fmt::ERROR; }
+		if (v < 0 || v >= limit[k]) { return Fmt::OUT_OF_RANGE; }
+	}
+	if (n == 19 || n == 20) { return Fmt::VALID; }
+	auto offset = [&](std::size_t at) {  // hh:mm at `at`
+		int h, m;
+		if (!ref_field(s, at, 2, h)) { return Fmt::ERROR; }
+		if (h < 0 || h >= 24) { return Fmt::OUT_OF_RANGE; }
+		if (!ref_field(s, at + 3, 2, m)) { return Fmt::ERROR; }
+		if (m < 0 || m >= 60) { return Fmt::OUT_OF_RANGE; }
+		return Fmt::VALID;
+	};
+	if (s[19] == '+' || s[19] == '-') {
+		return n == 25 && s[22] == ':' ? offset(20) : Fmt::INVALID;
+	}
+	if (s[19] != '.') { return Fmt::INVALID; }
+	std::size_t i = 20;
+	while (i < n && s[i] >= '0' && s[i] <= '9') { ++i; }
+	const std::size_t nd = i - 20;
+	Fmt rest = Fmt::VALID;
+	if (i < n) {
+		if (s[i] == 'Z') {
+			if (i + 1 != n) { return Fmt::ERROR; }
+		} else if (s[i] == '+' || s[i] == '-') {
+			if (n - i != 6 || s[i + 3] != ':') { return Fmt::INVALID; }
+			rest = offset(i + 1);
+		} else {
+			return Fmt::INVALID;
+		}
+	}
+	if (rest != Fmt::VALID) { return rest; }
+	return nd >= 1 && nd <= 62 ? Fmt::VALID : Fmt::ERROR;
+}
+
+static std::uint64_t class_neg = 0, class_frac = 0, class_z = 0;
+
 static void check_string(const std::string& s) {
 	if (overflow_prone(s)) { return; }
 	std::string_view sv(s);
-	compare("DatetimeParser", s,
-		run([&] { auto t = DatetimeOld::DatetimeParser(sv); return show(pack(t)); }),
-		run([&] { auto t = Datetime::DatetimeParser(sv); return show(pack(t)); }));
-	for (unsigned v = 0; v < 2; ++v) {
-		compare("Iso8601Parser(tm)", s,
-			run([&] { auto t = sentinel<DatetimeOld::tm_t>(v); auto f = DatetimeOld::Iso8601Parser(sv, t); return std::to_string(int(f)) + show(pack(t)); }),
-			run([&] { auto t = sentinel<Datetime::tm_t>(v); auto f = Datetime::Iso8601Parser(sv, t); return std::to_string(int(f)) + show(pack(t)); }));
+
+	// New overloads against the reference, and against each other.
+	const Fmt ref = ref_iso(sv);
+	const Fmt nv = Datetime::Iso8601Parser(sv);
+	// The filling overload can throw "Year is out of range" after a VALID scan (year 1 with an offset).
+	auto fill = [](auto parse) { try { return parse(); } catch (const std::exception&) { return Fmt::VALID; } };
+	const Fmt nf = fill([&] { auto t = sentinel<Datetime::tm_t>(0); return Datetime::Iso8601Parser(sv, t); });
+	++checks;
+	if (nv != ref || nf != ref) {
+		fail("verdict(new vs reference)", s, "ref=" + std::to_string(int(ref)) + " validate=" + std::to_string(int(nv)) + " fill=" + std::to_string(int(nf)));
 	}
-	compare("Iso8601Parser", s,
-		run([&] { return std::to_string(int(DatetimeOld::Iso8601Parser(sv))); }),
-		run([&] { return std::to_string(int(Datetime::Iso8601Parser(sv))); }));
-	compare("isDatetime", s,
-		run([&] { return std::to_string(DatetimeOld::isDatetime(sv)); }),
-		run([&] { return std::to_string(Datetime::isDatetime(sv)); }));
+
+	// Old vs new, Iso8601Parser(tm): equal unless the old verdict was wrong.
+	const Fmt of = fill([&] { auto t = sentinel<DatetimeOld::tm_t>(0); return Fmt(int(DatetimeOld::Iso8601Parser(sv, t))); });
+	const Fmt ov = Fmt(int(DatetimeOld::Iso8601Parser(sv)));
+	for (unsigned v = 0; v < 2; ++v) {
+		if (of == ref) {
+			compare("Iso8601Parser(tm)", s,
+				run([&] { auto t = sentinel<DatetimeOld::tm_t>(v); auto f = DatetimeOld::Iso8601Parser(sv, t); return std::to_string(int(f)) + show(pack(t)); }),
+				run([&] { auto t = sentinel<Datetime::tm_t>(v); auto f = Datetime::Iso8601Parser(sv, t); return std::to_string(int(f)) + show(pack(t)); }));
+		} else if (v == 0) {
+			++checks;
+			if ((of != Fmt::VALID && of != Fmt::INVALID) || ref == Fmt::VALID || ref == Fmt::INVALID) { fail("changed class (fill): old was not more permissive", s, ""); }
+			(ref == Fmt::OUT_OF_RANGE ? class_neg : class_frac)++;
+		}
+	}
+	if (ov == ref) {
+		compare("Iso8601Parser", s,
+			run([&] { return std::to_string(int(DatetimeOld::Iso8601Parser(sv))); }),
+			run([&] { return std::to_string(int(Datetime::Iso8601Parser(sv))); }));
+	} else {
+		++checks;
+		if ((ov != Fmt::VALID && ov != Fmt::INVALID) || ref == Fmt::VALID || ref == Fmt::INVALID) { fail("changed class (validate): old was not more permissive", s, ""); }
+		(ref == Fmt::OUT_OF_RANGE ? class_neg : class_frac)++;
+	}
+
+	// DatetimeParser works on the part before "||".
+	const auto bar = sv.find("||");
+	const auto prefix = sv.substr(0, bar);
+	const Fmt pref = ref_iso(prefix);
+	const Fmt pold = fill([&] { auto t = sentinel<DatetimeOld::tm_t>(0); return Fmt(int(DatetimeOld::Iso8601Parser(prefix, t))); });
+	auto old_dp = run([&] { auto t = DatetimeOld::DatetimeParser(sv); return show(pack(t)); });
+	auto new_dp = run([&] { auto t = Datetime::DatetimeParser(sv); return show(pack(t)); });
+	const std::string zmsg = "Invalid format in Datetime Math unit: 'h'. '' must be numeric";
+	if (pold != pref) {
+		// Class 1/2: the new parse must fail exactly as the reference verdict says.
+		++checks;
+		const std::string want = pref == Fmt::ERROR ? "Error format in _datetime: " + s : "Datetime: " + s + " is out of range";
+		if (!new_dp.threw || new_dp.msg != want) { fail("DatetimeParser changed class", s, "new=[" + (new_dp.threw ? new_dp.msg : new_dp.payload) + "]"); }
+	} else if (old_dp.threw && old_dp.msg == zmsg) {
+		// Class 3: oracle is the original on the "+00:00" spelling, with is_utc.
+		++class_z;
+		const auto z = s.find('Z');
+		++checks;
+		if (z == std::string::npos) { fail("loose Z class without a Z", s, ""); }
+		else {
+			const std::string s2 = s.substr(0, z) + "+00:00" + s.substr(z + 1);
+			auto oracle = run([&] { auto t = DatetimeOld::DatetimeParser(std::string_view(s2)); t.is_utc = true; return show(pack(t)); });
+			compare("DatetimeParser loose Z", s, oracle, new_dp);
+		}
+	} else {
+		compare("DatetimeParser", s, old_dp, new_dp);
+	}
+
+	if (ov == ref) {
+		compare("isDatetime", s,
+			run([&] { return std::to_string(DatetimeOld::isDatetime(sv)); }),
+			run([&] { return std::to_string(Datetime::isDatetime(sv)); }));
+	} else {
+		++checks;
+		if (Datetime::isDatetime(sv)) { fail("isDatetime changed class", s, "still true"); }
+	}
 	compare("isDate", s,
 		run([&] { return std::to_string(DatetimeOld::isDate(sv)); }),
 		run([&] { return std::to_string(Datetime::isDate(sv)); }));
@@ -542,6 +691,9 @@ int main(int argc, char** argv) {
 	format_tests(n);
 	tm_tests(n);
 
+	std::printf("changed classes hit: negative field %llu, fraction %llu, loose Z %llu\n",
+		static_cast<unsigned long long>(class_neg), static_cast<unsigned long long>(class_frac), static_cast<unsigned long long>(class_z));
+	if (class_neg == 0 || class_frac == 0 || class_z == 0) { std::printf("a changed class was never exercised\n"); ++failures; }
 	std::printf("%llu checks, %llu mismatches\n", static_cast<unsigned long long>(checks), static_cast<unsigned long long>(failures));
 	return failures == 0 ? 0 : 1;
 }

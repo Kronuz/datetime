@@ -42,6 +42,17 @@ Two files, `datetime.h` + `datetime.cc`, in the `Datetime` namespace:
   `to_tm_t(time_t)` / `to_tm_t(double)`, `timegm`, `iso8601(...)` formatters, and
   the `isDate` / `isDatetime` / `isTime` / `isTimedelta` predicates.
 
+Behavior notes:
+
+- Both `Iso8601Parser` overloads return the same `Format` for every input. A
+  negative or out-of-range hour/minute/second is `OUT_OF_RANGE`; a fraction needs
+  1 to 62 digits (`...:05.` and `...:05.Z` are `ERROR`).
+- A loose-format string such as `2020/01/02 03:04:05Z` ends in `Z` = UTC and sets
+  `is_utc`, like the ISO form.
+- Date-math terms are 64-bit; the supported years are 1 to `INT_MAX`. A result
+  outside them, and year 1 with an offset that reaches before 0001-01-01, throw
+  `DatetimeError("Year is out of range")`.
+
 Bad input throws `DatetimeError` (and its `DateISOError` / `TimeError` /
 `TimedeltaError` subclasses), all derived from `std::runtime_error`.
 

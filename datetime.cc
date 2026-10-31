@@ -105,6 +105,7 @@ static inline void civil_from_secs(std::int64_t t, std::int64_t& y, int& mon, in
 static inline void set_from_secs(Datetime::tm_t& tm, std::int64_t t) {
 	std::int64_t y;
 	civil_from_secs(t, y, tm.mon, tm.day, tm.hour, tm.min, tm.sec);
+	if (y > INT_MAX) { throw DatetimeError("Year is out of range"); }
 	tm.year = static_cast<int>(y);
 }
 
@@ -220,9 +221,9 @@ static inline bool parse_fsec(const char* digits, std::size_t nd, double& out) {
 // ISO 8601 scanner, shared by both Iso8601Parser overloads. Fill == true is the
 // overload that fills a tm_t (writing fields in the old order, including the
 // partial writes on failure); Fill == false only validates. The two differ in
-// signedness exactly as the old pair did (the filling one compares hour/min/sec
-// as int, the validating one as unsigned long; tz fields are unsigned in both),
-// and the validating one never parses the fraction.
+// nothing but the writes: every check (negative or out-of-range fields, a
+// fraction with no digits or too many) runs in both, so the two overloads return
+// the same Format for every input.
 // ---------------------------------------------------------------------------
 
 template <bool Fill>
@@ -266,10 +267,8 @@ static Datetime::Format iso8601_scan(std::string_view datetime, Datetime::tm_t* 
 		return Format::VALID;
 	}
 
-	// hour/min/sec: int compare when filling, unsigned long compare otherwise.
-	auto below = [](int v, bool wrap, int limit) {
-		if constexpr (Fill) { return v < limit; } else { return !wrap && v < limit; }
-	};
+	// hour/min/sec must lie in 0..limit-1; a negative field is out of range.
+	auto below = [](int v, bool, int limit) { return v >= 0 && v < limit; };
 	int hour, min, sec;
 	ok = field(p + 11, 2, hour, w);
 	if constexpr (Fill) { tm->hour = hour; }
@@ -289,14 +288,15 @@ static Datetime::Format iso8601_scan(std::string_view datetime, Datetime::tm_t* 
 		return Format::VALID;
 	}
 
-	// Offset hh:mm at p (unsigned compares in both overloads).
+	// Offset hh:mm at p (a negative field is out of range).
 	// Returns VALID with h/m set, or the failing Format.
 	auto offset = [](const char* q, int& h, int& m) {
 		bool hw, mw;
+		(void)hw; (void)mw;
 		if (!field(q, 2, h, hw)) { return Format::ERROR; }
-		if (hw || h >= 24) { return Format::OUT_OF_RANGE; }
+		if (h < 0 || h >= 24) { return Format::OUT_OF_RANGE; }
 		if (!field(q + 3, 2, m, mw)) { return Format::ERROR; }
-		if (mw || m >= 60) { return Format::OUT_OF_RANGE; }
+		if (m < 0 || m >= 60) { return Format::OUT_OF_RANGE; }
 		return Format::VALID;
 	};
 
@@ -319,22 +319,18 @@ static Datetime::Format iso8601_scan(std::string_view datetime, Datetime::tm_t* 
 			while (i < size && p[i] >= '0' && p[i] <= '9') { ++i; }
 			const std::size_t nd = i - 20;
 			if (i == size) {
-				if constexpr (Fill) {
-					double fsec;
-					if (!parse_fsec(p + 20, nd, fsec)) { return Format::ERROR; }
-					tm->fsec = fsec;
-				}
+				double fsec;
+				if (!parse_fsec(p + 20, nd, fsec)) { return Format::ERROR; }
+				if constexpr (Fill) { tm->fsec = fsec; }
 				return Format::VALID;
 			}
 			switch (p[i]) {
 				case 'Z':
 					if constexpr (Fill) { tm->is_utc = true; }
 					if (i + 1 == size) {
-						if constexpr (Fill) {
-							double fsec;
-							if (!parse_fsec(p + 20, nd, fsec)) { return Format::ERROR; }
-							tm->fsec = fsec;
-						}
+						double fsec;
+						if (!parse_fsec(p + 20, nd, fsec)) { return Format::ERROR; }
+						if constexpr (Fill) { tm->fsec = fsec; }
 						return Format::VALID;
 					}
 					return Format::ERROR;
@@ -345,9 +341,9 @@ static Datetime::Format iso8601_scan(std::string_view datetime, Datetime::tm_t* 
 						int h, m;
 						auto f = offset(p + i + 1, h, m);
 						if (f != Format::VALID) { return f; }
+						double fsec;
+						if (!parse_fsec(p + 20, nd, fsec)) { return Format::ERROR; }
 						if constexpr (Fill) {
-							double fsec;
-							if (!parse_fsec(p + 20, nd, fsec)) { return Format::ERROR; }
 							tm->fsec = fsec;
 							apply_tz(*tm, p[i], h, m, true);
 						}
@@ -562,9 +558,8 @@ static inline void process_date_datetime(Datetime::tm_t& tm, std::string_view st
 				if (m.tz == '+' || m.tz == '-') {
 					apply_tz(tm, m.tz, m.tz_h, m.tz_m, true);
 				} else if (m.tz == 'Z') {
-					// The original handed an unmatched (empty) offset to computeTimeZone,
-					// which always failed here; kept as is.
-					throw DatetimeError("Invalid format in Datetime Math unit: 'h'. '' must be numeric");
+					// Z is UTC, as on the ISO path: no offset to apply.
+					tm.is_utc = true;
 				}
 			}
 
@@ -719,6 +714,53 @@ static bool parse_int(std::string_view s, int& out) {
 }
 
 
+// Adds n units (y, M, w, d, h, m, s) to tm and renormalizes, all in 64-bit
+// arithmetic: |n| <= 2^31 and every field is an int, so no step can overflow.
+// The supported years are 1..INT_MAX; a step that would leave them throws
+// "Year is out of range" (the same error toordinal gives below year 1). The
+// month normalization is the one of normalizeMonths, quirks included.
+static void add_term(Datetime::tm_t& tm, std::int64_t n, char unit) {
+	std::int64_t year = tm.year, mon = tm.mon, day = tm.day, hour = tm.hour, min = tm.min, sec = tm.sec;
+	auto store = [&] {
+		auto fit = [](std::int64_t v) { return static_cast<int>(std::clamp<std::int64_t>(v, INT_MIN, INT_MAX)); };
+		tm.year = fit(year); tm.mon = fit(mon); tm.day = fit(day);
+		tm.hour = fit(hour); tm.min = fit(min); tm.sec = fit(sec);
+	};
+	auto normalize = [&] {
+		if (mon > 12) {
+			year += mon / 12;
+			mon %= 12;
+		} else {
+			const std::int64_t k = (12 - mon) / 12;  // months < 1: whole years to borrow
+			if (mon < 1) { year -= k; mon += 12 * k; }
+		}
+	};
+	switch (unit) {
+		case 'y': year += n; break;
+		case 'M': {
+			mon += n;
+			normalize();
+			store();
+			if (year < INT_MIN || year > INT_MAX) { throw DatetimeError("Year is out of range"); }
+			const auto max_days = Datetime::getDays_month(tm.year, tm.mon);
+			if (tm.day > max_days) { day = max_days; }
+			break;
+		}
+		case 'w': day += 7 * n; break;
+		case 'd': day += n; break;
+		case 'h': hour += n; break;
+		case 'm': min += n; break;
+		default: sec += n; break;
+	}
+	normalize();
+	store();
+	if (year < 1 || year > INT_MAX) { throw DatetimeError("Year is out of range"); }
+	if (mon < 1 || mon > 12) { throw DatetimeError("Month must be in 1..12"); }
+	const std::int64_t t = days_from_civil(year, static_cast<int>(mon), day) * 86400 + hour * 3600 + min * 60 + sec;
+	set_from_secs(tm, t);
+}
+
+
 /*
  * Compute a Datetime Math former by op + units.
  * op can be +#, -#, /, //
@@ -727,66 +769,18 @@ static bool parse_int(std::string_view s, int& out) {
 void
 Datetime::computeDateMath(tm_t& tm, std::string_view op, char unit)
 {
-	int num;
 	switch (op[0]) {
-		case '+': {
-			if (!parse_int(op.substr(1), num)) {
-				throw DatetimeError(std::format("Invalid format in Datetime Math unit: '{}'. '{}' must be numeric", unit, op.substr(1)));
-			}
-			switch (unit) {
-				case 'y':
-					tm.year += num; break;
-				case 'M': {
-					tm.mon += num;
-					normalizeMonths(tm.year, tm.mon);
-					auto max_days = getDays_month(tm.year, tm.mon);
-					if (tm.day > max_days) { tm.day = max_days; }
-					break;
-				}
-				case 'w':
-					tm.day += 7 * num; break;
-				case 'd':
-					tm.day += num; break;
-				case 'h':
-					tm.hour += num; break;
-				case 'm':
-					tm.min += num; break;
-				case 's':
-					tm.sec += num; break;
-				default:
-					throw DatetimeError(std::format("Invalid format in Datetime Math unit: '{}'. Unit must be in {{ y, M, w, d, h, m, s }}", unit));
-			}
-			break;
-		}
+		case '+':
 		case '-': {
+			int num;
 			if (!parse_int(op.substr(1), num)) {
 				throw DatetimeError(std::format("Invalid format in Datetime Math unit: '{}'. '{}' must be numeric", unit, op.substr(1)));
 			}
-			switch (unit) {
-				case 'y':
-					tm.year -= num;
-					break;
-				case 'M': {
-					tm.mon -= num;
-					normalizeMonths(tm.year, tm.mon);
-					auto max_days = getDays_month(tm.year, tm.mon);
-					if (tm.day > max_days) { tm.day = max_days; }
-					break;
-				}
-				case 'w':
-					tm.day -= 7 * num; break;
-				case 'd':
-					tm.day -= num; break;
-				case 'h':
-					tm.hour -= num; break;
-				case 'm':
-					tm.min -= num; break;
-				case 's':
-					tm.sec -= num; break;
-				default:
-					throw DatetimeError(std::format("Invalid format in Datetime Math unit: '{}'. Unit must be in {{ y, M, w, d, h, m, s }}", unit));
+			if (std::string_view("yMwdhms").find(unit) == std::string_view::npos) {
+				throw DatetimeError(std::format("Invalid format in Datetime Math unit: '{}'. Unit must be in {{ y, M, w, d, h, m, s }}", unit));
 			}
-			break;
+			add_term(tm, op[0] == '+' ? std::int64_t{num} : -std::int64_t{num}, unit);
+			return;
 		}
 		case '/':
 			switch (unit) {
@@ -966,7 +960,7 @@ Datetime::toordinal(int year, int month, int day)
 	if (day < 1 || day > getDays_month(year, month)) { throw DatetimeError("Day is out of range for month"); }
 
 	auto leap = static_cast<int>(isleapYear(year));
-	std::time_t result = 365 * (year - 1) + (year - 1) / 4 - (year - 1) / 100 + (year - 1) / 400 + cumdays[leap][month - 1] + day;
+	std::time_t result = 365LL * (year - 1) + (year - 1) / 4 - (year - 1) / 100 + (year - 1) / 400 + cumdays[leap][month - 1] + day;
 	return result;
 }
 

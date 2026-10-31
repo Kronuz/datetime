@@ -90,8 +90,13 @@ Expected output ends with `all datetime tests passed`, exit 0. The test target i
   as `-5h -30m`, so an offset shifts the stored `tm_t` to the UTC instant (and
   can roll the date). That is intended; don't "fix" it to keep wall-clock fields.
 - **Two `Iso8601Parser` overloads must stay in sync.** One fills a `tm_t`, one
-  only validates. A format accepted by one but not the other will make
-  `isDatetime` and `DatetimeParser` disagree.
+  only validates; both are `iso8601_scan<Fill>`, which runs every check in both
+  and only skips the writes. Keep it that way: `test/diff_test.cc` asserts both
+  verdicts equal a reference verdict (`ref_iso`) for every input.
+- **Date math is 64-bit (`add_term`).** `+N`/`-N` never touch `int` arithmetic;
+  supported years are 1..`INT_MAX`. `test/datemath_test.cc` checks it against a
+  days-from-civil reference and is meant to be run under UBSan too.
+- **Loose `Z` is UTC** (`is_utc = true`), like the ISO path.
 
 ## Standalone vs. Xapiand
 

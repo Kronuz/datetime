@@ -22,6 +22,25 @@ formatting back out. For query languages and APIs that take dates as text.
 - **Clear errors**: `DatetimeError` and its subclasses, all `std::runtime_error`.
 - **Predicates**: `isDate`, `isDatetime`, `isTime`, `isTimedelta`.
 
+## Behavior changes
+
+These inputs changed result (correctness fixes); everything else parses and
+formats as before.
+
+- `Iso8601Parser(str, tm)` and `Iso8601Parser(str)` (and so `isDatetime` and
+  `DatetimeParser`) now agree on every input. A negative hour, minute or second
+  (`T-3:04:05`) is `OUT_OF_RANGE` in both (the filling overload used to accept
+  it). A fraction dot with no digits (`...:05.`, `...:05.Z`) or with more than 62
+  digits is `ERROR` in both (the validating overload used to accept it).
+- A loose-format string ending in `Z` (`2020/01/02 03:04:05Z`) parses as UTC
+  (`is_utc` set), like the ISO form; it used to always throw.
+- Date-math terms such as `+2147483647d` are computed in 64-bit arithmetic; they
+  used to overflow `int` (undefined behavior). The supported years are 1 to
+  `INT_MAX`; a result beyond them throws `Year is out of range`.
+- Unchanged on purpose: year 1 with an offset that moves the instant before
+  0001-01-01 throws `Year is out of range` (the instant is outside the supported
+  years), and `+12M` from December throws `Month must be in 1..12`.
+
 ## 📦 Installation
 
 Requires a C++20 compiler and CMake 3.14 or newer; it fetches

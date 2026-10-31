@@ -574,6 +574,21 @@ static void check_math(const Datetime::tm_t& base, const std::string& math, bool
 		}
 		return;
 	}
+	if (base.mon > 12 && base.mon % 12 == 0 && old_o.payload != new_o.payload && old_o.payload.rfind("throw ", 0) == 0 && new_o.payload.rfind("throw ", 0) == 0) {
+		// Class 5, base month a multiple of 12 above 12: both throw (e.g. "Year is
+		// out of range") but the old code left month 0 behind. Oracle: the old code
+		// on the same base with the month already normalized (month 12, years carried).
+		auto oracle = run([&] {
+			DatetimeOld::tm_t t; mk(t);
+			t.year = base.year + base.mon / 12 - 1; t.mon = 12;
+			std::string r;
+			try { if (direct_op) DatetimeOld::computeDateMath(t, math, unit); else DatetimeOld::processDateMath(math, t); } catch (const std::exception& e) { r = std::string("throw ") + e.what() + " "; }
+			return r + show(pack(t));
+		});
+		++checks;
+		if (oracle.payload != new_o.payload) { fail("math throw on a month multiple of 12", label, "oracle " + oracle.payload + " vs new " + new_o.payload); }
+		return;
+	}
 	compare(direct_op ? "computeDateMath" : "processDateMath", label, old_o, new_o);
 }
 

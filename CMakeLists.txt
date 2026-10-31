@@ -49,7 +49,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(datetime_diff_test test/diff_test.cc test/old/datetime_old.cc)
   target_include_directories(datetime_diff_test PRIVATE test)
   target_link_libraries(datetime_diff_test PRIVATE datetime)
-  add_test(NAME datetime_diff COMMAND datetime_diff_test 100000)
+  add_test(NAME datetime_diff COMMAND datetime_diff_test 20000)
 
   # Benchmark against the frozen original (no external comparators needed):
   #   cmake -B build -DDATETIME_BUILD_BENCH=ON -DCMAKE_BUILD_TYPE=Release

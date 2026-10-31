@@ -9,7 +9,7 @@
 //     published algorithm, written here from its description) in 128-bit
 //     arithmetic. Results in the supported years (1..INT_MAX) must match; a
 //     step that leaves them must throw DatetimeError. Run it under UBSan:
-//     before the 64-bit rewrite these terms overflowed int.
+//     arithmetic. Run it under UBSan: these terms overflow `int`.
 //
 // Usage: datetime_datemath_test [iterations [seed]]
 #include <climits>

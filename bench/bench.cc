@@ -1,4 +1,4 @@
-// Benchmark: current datetime vs the frozen original (test/old, namespace
+// Benchmark: current datetime vs the frozen reference (test/old, namespace
 // DatetimeOld) on the same inputs. 4096 random inputs per row, best of 7 passes.
 // Each row first checks that old and new agree on every input.
 //

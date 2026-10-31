@@ -18,12 +18,12 @@ auto eom = Datetime::DatetimeParser("2021-02-10||/M");        // end of February
 
 ## Scope
 
-This library is the **pure string/number core**. The original Xapiand code also
-parsed dates given as a MsgPack structured object (`{year: 2021, month: 3, ...}`).
-That path depends on MsgPack, Xapiand's reserved-key tokens, and a perfect-hash
-table, so it stays in Xapiand as a thin glue layer that extracts the value and
-delegates to this library's string/double parsers. There is no `now` keyword
-here either; relative-to-now resolution is a caller concern.
+This library is the **pure string/number core**. Xapiand also parses dates given
+as a MsgPack structured object (`{year: 2021, month: 3, ...}`). That path
+depends on MsgPack, Xapiand's reserved-key tokens, and a perfect-hash table, so
+it lives in Xapiand as a thin glue layer that extracts the value and delegates
+to this library's string/double parsers. There is no `now` keyword here either;
+relative-to-now resolution is a caller concern.
 
 ## What it parses and formats
 

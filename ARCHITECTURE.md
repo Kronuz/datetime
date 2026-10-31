@@ -28,18 +28,17 @@ that does the work in two stages:
    to the slow path on `INVALID`. There are two overloads, one function
    template (`iso8601_scan<Fill>`): one fills a `tm_t`, one only validates (used
    by `isDatetime`). Fixed-width fields are read as plain digits; any other byte
-   takes an exact emulation of the `strtoul` grammar the original used (leading
-   whitespace, a sign), so odd fields such as `"+5"` or `" 5"` still parse. The
-   two overloads run every check (a negative or out-of-range field is
-   `OUT_OF_RANGE`; a fraction dot needs 1 to 62 digits, else `ERROR`) and differ
-   only in whether they write the `tm_t`, so they return the same `Format` for
-   every input. The classes where this differs from the original are listed in
-   `test/diff_test.cc`.
+   takes an exact emulation of the `strtoul` grammar (leading whitespace, a
+   sign), so odd fields such as `"+5"` or `" 5"` parse. The two overloads run
+   every check (a negative or out-of-range field is `OUT_OF_RANGE`; a fraction
+   dot needs 1 to 62 digits, else `ERROR`) and differ only in whether they write
+   the `tm_t`, so they return the same `Format` for every input.
 2. **Loose-format scanner** (`scan_date_re`). A hand scanner for the grammar of
    `date_re` (`/`, space or no separator, 1-digit hours, `,` fractions, spaced
    offsets) that also captures the `|| <date math>` suffix. Only reached when the
-   fast path says `INVALID`. `date_re` and `date_math_re` stay exported for
-   ABI/API compatibility but nothing in the library uses them.
+   fast path says `INVALID`. A loose-format string ending in `Z`, or carrying an
+   offset, sets `is_utc` like the ISO path. `date_re` and `date_math_re` are
+   exported for ABI/API compatibility; the library does not use them.
 
 If the string contains `||`, the part before it is parsed as a datetime and the
 part after is fed to `processDateMath`.
@@ -54,12 +53,14 @@ subtract; `/unit` rounds *up* to the end of the unit (e.g. `/M` -> last day,
 civil-from-days conversion, so overflow (e.g. day 32) carries correctly. A
 `+N`/`-N` term is applied in 64-bit arithmetic (`|N| <= 2^31`, so no step can
 overflow); the supported years are 1 to `INT_MAX`, and a step that leaves them
-throws `DatetimeError("Year is out of range")`.
+throws `DatetimeError("Year is out of range")`. Months use floor division:
+`normalizeMonths` maps any month to 1..12 and carries whole years, so `+12M`
+from December is December of the next year, and the day clamps to the length of
+the new month.
 `computeTimeZone` of `+05:30` means `-5h -30m` of date math (the wall-clock value
 becomes the UTC instant); the parsers apply it as one integer sum with the same
-results, including the original's `Year is out of range` throw when the first
-step leaves year 0. Offsets the integer path does not cover still run through
-`computeDateMath`.
+results, including the `Year is out of range` throw when the first step leaves
+year 0. Other offsets run through `computeDateMath`.
 
 `Time` and `Timedelta` use their own length-keyed scanners
 (`TimeParser` / `TimedeltaParser`), not the regex.
@@ -73,53 +74,50 @@ semantics, no libc time-zone state). Leap-year
 and days-in-month logic lives in `isleapYear` / `getDays_month` with two static
 `days` / `cumdays` tables.
 
-## Decoupling delta from Xapiand
+## Relation to Xapiand
 
-The library is the *pure half* of Xapiand's `src/datetime.{h,cc}`. The changes
-made during extraction, all behavior-preserving except where noted:
+The library is the *pure half* of Xapiand's `src/datetime.{h,cc}`. It differs
+from that file in these ways:
 
-- **Exceptions reparented.** `DatetimeError` derived from Xapiand's `ClientError`
-  (which is a located-exception `Exception`). Here it derives from
-  `std::runtime_error`, and `DateISOError` / `TimeError` / `TimedeltaError`
-  derive from `DatetimeError`. The names and the message-string constructors are
-  unchanged, so existing `catch (const DatetimeError&)` (and subclass) sites
-  still work. The forward `class MsgPack;` and `#include "exception.h"` are gone.
-- **`THROW(X, "fmt", a)` -> `throw X(std::format("fmt", a))`.** The
-  located-exception `THROW` macro needs a `BaseException`-shaped constructor
-  (`__func__, __FILE__, __LINE__, ...`); a `std::runtime_error` subclass does not
-  have it, so the throws are spelled out directly.
-- **`strings::format` -> `std::format`** (`<format>`), dropping `strings.hh`.
-- **`repr(value)` inlined.** Two date-math error messages used Xapiand's `repr`
-  to quote the offending token; that is now plain `'{}'` quoting in the
-  `std::format` string. One of those messages had a latent bug in the original (a
-  `{}` with no matching argument); the extracted version passes the unit and the
-  token so it formats correctly.
-- **Logging dropped.** The lone `L_CALL` was in the MsgPack overload (now glue);
-  `L_ERR` was included but never called. No logging remains, so `log.h` is gone.
-- **MsgPack path lifted out.** The `process_date_year/_month/.../_datetime`
-  static helpers and the `DatetimeParser(const MsgPack&)` /
+- **Exceptions.** `DatetimeError` derives from `std::runtime_error` (Xapiand's
+  derives from `ClientError`, a located exception), and `DateISOError` /
+  `TimeError` / `TimedeltaError` derive from `DatetimeError`. The names and the
+  message-string constructors match Xapiand's, so existing
+  `catch (const DatetimeError&)` (and subclass) sites work. There is no forward
+  `class MsgPack;` and no `#include "exception.h"`.
+- **`throw X(std::format("fmt", a))`.** The located-exception `THROW` macro needs
+  a `BaseException`-shaped constructor (`__func__, __FILE__, __LINE__, ...`) that
+  a `std::runtime_error` subclass does not have, so the throws are spelled out.
+- **`std::format`** (`<format>`) replaces `strings::format` and `strings.hh`.
+- **Quoting.** Two date-math error messages quote the offending token with plain
+  `'{}'` in the `std::format` string, where Xapiand used `repr`. Each passes the
+  unit and the token.
+- **No logging.** There is no `log.h`.
+- **No MsgPack path.** The `process_date_year/_month/.../_datetime` static
+  helpers and the `DatetimeParser(const MsgPack&)` /
   `time_to_double(const MsgPack&)` / `timedelta_to_double(const MsgPack&)`
-  overloads were the only users of MsgPack, the `RESERVED_*` tokens, and
-  `phf::make_phf` / `hh(...)`. They moved to Xapiand-side glue that delegates back
+  overloads are the only users of MsgPack, the `RESERVED_*` tokens, and
+  `phf::make_phf` / `hh(...)`. They live in Xapiand-side glue that delegates back
   to this library's string/double parsers.
 
 ## Dependencies
 
 - **strict-stox** (header-only, FetchContent). Fractions longer than 6 digits
-  and the time/timedelta parsers still use `strict_stod` / `strict_stoul`; the
+  and the time/timedelta parsers use `strict_stod` / `strict_stoul`; the
   datetime date/time fields are read directly. This is the library's only third-party dependency.
-- **No hashes / phf.** The perfect-hash table was MsgPack-key dispatch in the
+- **No hashes / phf.** The perfect-hash table is MsgPack-key dispatch in the
   glue half. The pure core does not hash anything, so `hashes` is *not* a
-  dependency here (unlike some sibling extractions).
+  dependency here (unlike some sibling libraries).
 - Standard library: `<regex>` (only for the exported `date_re` objects), `<format>`, `<chrono>`, `<ctime>`.
 
 ## Trade-offs
 
 - The ISO 8601 scanner is one template for both overloads, so they cannot drift
-  apart; `test/diff_test.cc` compares every entry point against a frozen copy of
-  the original (`test/old/`) on random, mutated and exhaustively byte-mutated
-  inputs. The loose-format scanner is the catch-all for the less common
-  separator styles and the date-math suffix.
+  apart; `test/diff_test.cc` compares every entry point against the frozen
+  reference (`test/old/`) on random, mutated and exhaustively byte-mutated
+  inputs, and asserts each input class where the result differs against an
+  independent oracle. The loose-format scanner is the catch-all for the less
+  common separator styles and the date-math suffix.
 - `timestamp` / `timegm` are only correct for year > 0 (proleptic Gregorian from
   year 1). That is the documented domain; `isValidDate` rejects year < 1.
 - The library assumes a 64-bit `time_t` for the full datetime range.

@@ -3,8 +3,8 @@
 // Exercises datetime.h / datetime.cc: the ISO 8601 + Elasticsearch-style
 // date-math parser/formatter, the time and timedelta parsers, the
 // timestamp <-> tm_t round-trip, the iso8601() formatter, and the throwing
-// error paths (which now raise the std::runtime_error-based DatetimeError /
-// DateISOError / TimeError instead of Xapiand's THROW macros).
+// error paths (which raise the std::runtime_error-based DatetimeError /
+// DateISOError / TimeError).
 //
 // Build via CMake: cmake -B build && cmake --build build && ctest --test-dir build
 #include <cassert>
@@ -228,11 +228,11 @@ static void test_predicates() {
 
 
 // ---------------------------------------------------------------------------
-// Correctness fixes: both ISO overloads agree, loose Z is UTC, date math is
-// 64-bit with a year range. (Exhaustive and oracle checks: diff_test.cc and
-// datemath_test.cc.)
+// Edge behaviors: both ISO overloads agree, loose Z and loose offsets are UTC,
+// months wrap at multiples of 12, date math is 64-bit with a year range.
+// (Exhaustive and oracle checks: diff_test.cc and datemath_test.cc.)
 // ---------------------------------------------------------------------------
-static void test_fixed_behaviors() {
+static void test_edge_behaviors() {
 	using Datetime::Format;
 	// Negative hour/min/sec: out of range in both overloads.
 	for (const char* s : { "2020-01-02T-3:04:05", "2020-01-02T03:-4:05", "2020-01-02T03:04:-5" }) {
@@ -260,7 +260,15 @@ static void test_fixed_behaviors() {
 	assert(z.year == 2020 && z.mon == 1 && z.day == 2 && z.hour == 3 && z.min == 4 && z.sec == 5 && z.is_utc);
 	auto zm = Datetime::DatetimeParser(std::string_view("2020/01/02 3:04Z||+1d"));
 	assert(zm.day == 3 && zm.hour == 3 && zm.is_utc);
-	// Year 1 with an offset before 0001-01-01 stays an error.
+	// A loose-format offset is applied and the result is UTC, like the ISO path.
+	auto lo = Datetime::DatetimeParser(std::string_view("2020/01/02 03:04:05+05:30"));
+	assert(lo.year == 2020 && lo.mon == 1 && lo.day == 1 && lo.hour == 21 && lo.min == 34 && lo.sec == 5 && lo.is_utc);
+	// Months wrap at multiples of 12: +12M from December is December of the next year.
+	for (const char* s : { "2020-12-15||+12M", "2019-12-15||+24M", "2022-12-15||-12M" }) {
+		auto m = Datetime::DatetimeParser(std::string_view(s));
+		assert(m.year == 2021 && m.mon == 12 && m.day == 15);
+	}
+	// Year 1 with an offset before 0001-01-01 is an error.
 	bool threw = false;
 	try { Datetime::DatetimeParser(std::string_view("0001-01-01T00:00:00+05:00")); } catch (const DatetimeError&) { threw = true; }
 	assert(threw);
@@ -271,12 +279,12 @@ static void test_fixed_behaviors() {
 	try { Datetime::DatetimeParser(std::string_view("2020-01-01||+2147483647y")); } catch (const DatetimeError&) { threw = true; }
 	assert(threw);
 
-	std::printf("datetime fixed behaviors OK\n");
+	std::printf("datetime edge behaviors OK\n");
 }
 
 
 int main() {
-	test_fixed_behaviors();
+	test_edge_behaviors();
 	test_iso8601_parse();
 	test_date_math();
 	test_timestamp_roundtrip();

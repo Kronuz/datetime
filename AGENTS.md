@@ -9,16 +9,20 @@ how to build and test, the invariants you must not break, and the traps.
 ```
 datetime.h                   Datetime namespace API: tm_t / clk_t / Format, the parsers/formatters, DatetimeError hierarchy. Header.
 datetime.cc                  The pure-core implementation: ISO 8601 + date-math + time + timedelta parsing/formatting. Compiled.
-test/diff_test.cc            Differential test against the frozen original in test/old/ (CTest `datetime_diff`).
-test/old/                    Frozen pre-rewrite datetime.h/.cc, namespace DatetimeOld. Do not edit.
-bench/bench.cc               Old-vs-new benchmark (-DDATETIME_BUILD_BENCH=ON).
+test/diff_test.cc            Differential test against the frozen reference in test/old/ (CTest `datetime_diff`).
+test/old/                    Frozen reference datetime.h/.cc, namespace DatetimeOld. Do not edit.
+test/datemath_test.cc        Years 1..9999, huge date-math terms, months and loose offsets against independent references (CTest `datetime_datemath`).
+test/ref.h                   The references: days-from-civil, the month arithmetic model.
+bench/bench.cc               Benchmark against test/old/ (-DDATETIME_BUILD_BENCH=ON).
 test/test.cc                 Runnable smoke test: ISO parses, date math, timestamp round-trip, time/timedelta, throwing paths, predicates.
+examples/demo.cc             A runnable tour of every input form (not a test).
+CHANGELOG.md                 Dated changes, behavior changes and benchmark history.
 CMakeLists.txt               STATIC library `datetime` (+ alias datetime::datetime); FetchContents strict-stox; CTest test `datetime`.
 LICENSE                      MIT, Copyright (c) 2015-2019 Dubalu LLC.
 README.md                    What it is, install, quick start.
 docs/API.md                  Usage, scope, and everything it parses and formats.
 docs/datetime.d2             The README diagram's source (docs/datetime.svg is rendered from it).
-ARCHITECTURE.md              Parse paths, numeric core, the decoupling delta from Xapiand.
+ARCHITECTURE.md              Parse paths, numeric core, how the library differs from Xapiand.
 ```
 
 This is a compiled library (one `.cc`), not header-only. The CMake target is a
@@ -61,15 +65,16 @@ Expected output ends with `all datetime tests passed`, exit 0. The test target i
 - **Date-math rounding direction.** `/unit` rounds *up* (end of unit, fsec =
   `DATETIME_MAX_FSEC`); `//unit` rounds *down* (start of unit, fsec 0). The test
   pins both; keep them straight.
-- **Behavior is pinned to the original, quirks included.** `test/old/` is a frozen
-  copy of the pre-rewrite implementation (namespace `DatetimeOld`) and
-  `datetime_diff_test` compares every parser/formatter against it. Date fields
-  are read by `field()`, which emulates the old `strict_stoul` grammar (so
-  `"-1"` as an hour is accepted by the filling parser, rejected by the validating
-  one; `Z` after a loose-format time throws). Keep the differential test green;
-  do not "fix" a quirk without an owner decision.
-- **`strict_*` nothrow variant** is still used for fractions over 6 digits and by
-  the time/timedelta scanners; branch on `errno_save` rather than catching.
+- **Results equal the frozen reference except in the listed classes.** `test/old/`
+  is the frozen reference implementation (namespace `DatetimeOld`) and
+  `datetime_diff_test` compares every parser and formatter against it. The input
+  classes that differ (negative fields, fractions, loose `Z`, months, loose
+  offsets) are listed at the top of `test/diff_test.cc`, each with its oracle.
+  Date fields are read by `field()`, which emulates the `strtoul` grammar
+  (`"+5"` and `" 5"` are fields). Keep the differential test green; a result
+  that changes outside those classes needs an owner decision.
+- **`strict_*` nothrow variant** serves fractions over 6 digits and the
+  time/timedelta scanners; branch on `errno_save` rather than catching.
 - **Year > 0 domain.** `timegm` / `timestamp` / `toordinal` are proleptic
   Gregorian from year 1; `isValidDate` rejects year < 1. Don't feed year 0.
 
@@ -102,17 +107,16 @@ Expected output ends with `all datetime tests passed`, exit 0. The test target i
 
 ## Standalone vs. Xapiand
 
-This is a standalone extraction from
-[Xapiand](https://github.com/Kronuz/Xapiand), and specifically the **pure
-string/number half** of `src/datetime.{h,cc}`. The delta is decoupling:
-exceptions reparented to `std::runtime_error`; `THROW(...)` -> `throw
-X(std::format(...))`; `strings::format` -> `std::format`; `repr(...)` quoting
-inlined; logging dropped.
+This is the **pure string/number half** of
+[Xapiand](https://github.com/Kronuz/Xapiand)'s `src/datetime.{h,cc}`. It differs
+from that file by decoupling: the exceptions derive from `std::runtime_error`;
+`THROW(...)` is `throw X(std::format(...))`; `strings::format` is `std::format`;
+`repr(...)` quoting is inline; there is no logging.
 
 The **MsgPack structured-object half** (the `process_date_*` static helpers and
 the `DatetimeParser(const MsgPack&)` / `time_to_double(const MsgPack&)` /
-`timedelta_to_double(const MsgPack&)` overloads) was *not* extracted. It is the
-only user of MsgPack, the `RESERVED_*` tokens, and `phf::make_phf` / `hh(...)`,
+`timedelta_to_double(const MsgPack&)` overloads) is not part of this library. It
+is the only user of MsgPack, the `RESERVED_*` tokens, and `phf::make_phf` / `hh(...)`,
 and it lives in Xapiand as glue (`datetime_msgpack.{h,cc}`) that pulls the value
 out of the MsgPack and delegates to this library's string/double parsers. Keep
 that boundary: anything MsgPack- or reserved-token-shaped does not belong here.

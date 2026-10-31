@@ -67,7 +67,7 @@ static constexpr std::int64_t floor_div(std::int64_t a, std::int64_t b) {
 }
 
 // Days since 1970-01-01 of year-month-day; `d` is used linearly, so an
-// out-of-month day rolls over like the old toordinal-based arithmetic.
+// out-of-month day rolls over into the following months.
 static constexpr std::int64_t days_from_civil(std::int64_t y, int m, std::int64_t d) {
 	y -= m <= 2;
 	const std::int64_t era = floor_div(y, 400);
@@ -113,14 +113,13 @@ static inline std::int64_t secs_of(const Datetime::tm_t& tm) {
 	return days_from_civil(tm.year, tm.mon, tm.day) * 86400 + tm.hour * 3600LL + tm.min * 60LL + tm.sec;
 }
 
-// Seconds at 0001-01-01T00:00:00; the old code threw "Year is out of range"
-// as soon as a date-math step started from a year below it.
+// Seconds at 0001-01-01T00:00:00; a date-math step that starts from a year
+// below it throws "Year is out of range".
 static constexpr std::int64_t MIN_YEAR1_SECS = -62135596800LL;
 
 
-// Offsets: the old code applied "-H h" then "-M m" through computeDateMath,
-// each step renormalizing the fields (and the second step throwing when the
-// first one left year 0). One integer sum gives the same fields.
+// Offsets: "-H h" then "-M m" of date math, as one integer sum (the second
+// step throws when the first one leaves year 0).
 // Precondition: tm.year >= 1 and 1 <= tm.mon <= 12.
 // `day_in_month` promises 1 <= tm.day <= days in tm.mon; then an offset that
 // keeps the time of day within the same date touches only hour/min/sec.
@@ -147,11 +146,11 @@ static inline void apply_tz(Datetime::tm_t& tm, char op, int h, int m, bool day_
 
 
 // ---------------------------------------------------------------------------
-// Field readers. The old code read each fixed-width field with strict_stoul
-// (strtoul on a copy): optional leading isspace, optional sign, then digits
-// up to the end of the field, nothing else. `field` takes the 2/4 plain digits
-// fast path and otherwise emulates that grammar exactly. A negative value
-// wraps as an unsigned long in the old code (`wrap`); it becomes -v as an int.
+// Field readers. A fixed-width field is an optional leading isspace, an
+// optional sign, then digits up to the end of the field, nothing else (the
+// strtoul grammar). `field` takes the 2/4 plain digits fast path and otherwise
+// emulates that grammar exactly. A nonzero negative value sets `wrap`; `v` is
+// the signed value.
 // ---------------------------------------------------------------------------
 
 static bool slow_field(const char* p, int n, int& v, bool& wrap) {
@@ -194,7 +193,7 @@ static inline bool field(const char* p, int n, int& v, bool& wrap) {
 
 // Fraction digits to a normalized fsec. Up to 6 digits are integer microseconds
 // (round(strtod(".ddd") * 1e6) / 1e6 is exactly micro / 1e6); anything else
-// takes the original strict_stod + normalize_fsec path.
+// takes the strict_stod + normalize_fsec path.
 static inline bool parse_fsec(const char* digits, std::size_t nd, double& out) {
 	if (nd >= 1 && nd <= 6) {
 		unsigned micro = 0;
@@ -219,8 +218,8 @@ static inline bool parse_fsec(const char* digits, std::size_t nd, double& out) {
 
 // ---------------------------------------------------------------------------
 // ISO 8601 scanner, shared by both Iso8601Parser overloads. Fill == true is the
-// overload that fills a tm_t (writing fields in the old order, including the
-// partial writes on failure); Fill == false only validates. The two differ in
+// overload that fills a tm_t (including the partial writes on failure);
+// Fill == false only validates. The two differ in
 // nothing but the writes: every check (negative or out-of-range fields, a
 // fraction with no digits or too many) runs in both, so the two overloads return
 // the same Format for every input.
@@ -367,7 +366,7 @@ static Datetime::Format iso8601_scan(std::string_view datetime, Datetime::tm_t* 
 
 
 // ---------------------------------------------------------------------------
-// Hand scanner for the grammar of date_re (kept exported, no longer used):
+// Hand scanner for the grammar of date_re (which stays exported, unused):
 //
 //   YYYY ([-/ ]?) MM \2 DD
 //   ( [T ]? H:mm ( :ss ([.,]digits+)? )? ( [ ]*[+-]H:mm | Z )? )?
@@ -651,8 +650,8 @@ Datetime::processDateMath(std::string_view date_math, tm_t& tm)
 }
 
 
-// The original implementation: builds the two date-math operators as strings.
-// Kept for arguments the integer path does not cover.
+// Builds the two date-math operators as strings, for the arguments the
+// integer path does not cover.
 static void computeTimeZone_generic(Datetime::tm_t& tm, char op, std::string_view hour, std::string_view min) {
 	std::string oph, opm;
 	oph.reserve(3);
@@ -1139,8 +1138,8 @@ Datetime::iso8601(const std::tm& tm, bool trim, char sep)
 }
 
 
-// The original std::format based writer. Used for fractions the integer
-// writer does not cover (>= 1 or not finite), where {:.6f} prints extra digits.
+// The std::format based writer, for fractions the integer writer does not
+// cover (>= 1 or not finite), where {:.6f} prints extra digits.
 static std::string
 iso8601_generic(const Datetime::tm_t& tm, bool trim, char sep)
 {

@@ -22,29 +22,22 @@ formatting back out. For query languages and APIs that take dates as text.
 - **Clear errors**: `DatetimeError` and its subclasses, all `std::runtime_error`.
 - **Predicates**: `isDate`, `isDatetime`, `isTime`, `isTimedelta`.
 
-## Behavior changes
-
-These inputs changed result (correctness fixes); everything else parses and
-formats as before.
+## Behavior
 
 - `Iso8601Parser(str, tm)` and `Iso8601Parser(str)` (and so `isDatetime` and
-  `DatetimeParser`) now agree on every input. A negative hour, minute or second
-  (`T-3:04:05`) is `OUT_OF_RANGE` in both (the filling overload used to accept
-  it). A fraction dot with no digits (`...:05.`, `...:05.Z`) or with more than 62
-  digits is `ERROR` in both (the validating overload used to accept it).
-- A loose-format string ending in `Z` (`2020/01/02 03:04:05Z`) parses as UTC
-  (`is_utc` set), like the ISO form; it used to always throw.
-- Date-math terms such as `+2147483647d` are computed in 64-bit arithmetic; they
-  used to overflow `int` (undefined behavior). The supported years are 1 to
-  `INT_MAX`; a result beyond them throws `Year is out of range`.
-- `+12M` (any month count that lands on a multiple of 12 past December) no longer
-  throws `Month must be in 1..12`: `2020-12-15||+12M` is `2021-12-15`.
-  `normalizeMonths` now maps any month to 1..12 and carries the years.
-- A loose-format offset (`2020/01/02 03:04:05+05:30`) sets `is_utc`, as the ISO
-  form does: an applied offset means the result is the UTC instant.
-- Unchanged on purpose: year 1 with an offset that moves the instant before
-  0001-01-01 throws `Year is out of range` (the instant is outside the supported
-  years).
+  `DatetimeParser`) agree on every input. A negative hour, minute or second
+  (`T-3:04:05`) is `OUT_OF_RANGE`. A fraction dot with no digits (`...:05.`,
+  `...:05.Z`) or with more than 62 digits is `ERROR`.
+- An offset is applied and the result is the UTC instant, with `is_utc` set, in
+  the ISO and the loose formats (`2020/01/02 03:04:05+05:30`). A loose-format
+  string ending in `Z` is UTC too.
+- Month arithmetic is exact for any count: `2020-12-15||+12M` is `2021-12-15`,
+  and the day clamps to the length of the new month (`2020-01-31||+1M` is
+  `2020-02-29`).
+- Date-math terms such as `+2147483647d` are computed in 64-bit arithmetic. The
+  supported years are 1 to `INT_MAX`; a result beyond them throws
+  `Year is out of range`. Year 1 with an offset that moves the instant before
+  0001-01-01 throws the same error.
 
 ## 📦 Installation
 
@@ -94,6 +87,7 @@ rules.
 
 - [docs/API.md](docs/API.md): usage, every parser and formatter, and the scope.
 - [ARCHITECTURE.md](ARCHITECTURE.md): the grammar and how date math is applied.
+- [CHANGELOG.md](CHANGELOG.md): dated changes, behavior changes and benchmark history.
 - [AGENTS.md](AGENTS.md): repository map and traps.
 
 ## 🛠️ Building and testing
@@ -103,7 +97,7 @@ cmake -B build && cmake --build build && ctest --test-dir build
 ./build/datetime_demo
 ```
 
-## ⚡ How it is fast
+## ⚡ Performance
 
 Parsing and formatting avoid per-field library calls and allocations: fixed-width
 digits are read directly, fractions up to 6 digits are integer microseconds, a
@@ -111,10 +105,19 @@ UTC offset is one integer add, the loose formats (`2020/01/02 3:04`) and
 `|| date math` use hand scanners instead of `std::regex`, `iso8601` writes digits
 into a stack buffer (fractions rounded exactly, ties to even, like `{:.6f}`), and
 `to_tm_t` uses an integer civil-from-days conversion instead of `gmtime_r`.
-Results are identical to the earlier implementation on every input, accepted or
-rejected (`ctest` runs a differential test against a frozen copy). Typical
-speedups on one core: ISO parse 5-9x, loose format ~80x, date math ~15x,
-`iso8601` ~9x, `to_tm_t` ~5x. Run `-DDATETIME_BUILD_BENCH=ON` for the numbers.
+
+`ctest` runs `datetime_diff_test`, a differential test of every entry point
+against a frozen reference implementation in `test/old/`, and
+`datetime_datemath_test`, which checks date math against independent references.
+The input classes whose result differs from the reference are listed at the top
+of `test/diff_test.cc` and in [CHANGELOG.md](CHANGELOG.md).
+
+`datetime_bench` times each entry point against the reference on random inputs:
+
+```sh
+cmake -B build -DDATETIME_BUILD_BENCH=ON -DCMAKE_BUILD_TYPE=Release && cmake --build build
+./build/datetime_bench
+```
 
 ## 🤝 Contributing
 

@@ -1,47 +1,50 @@
 // Differential test: the hand-written parsers/formatters in datetime.cc against
-// the frozen original implementation in test/old/ (namespace DatetimeOld).
+// the frozen reference implementation in test/old/ (namespace DatetimeOld).
 //
-// Every public entry point touched by the rewrite is fed random, grammar-based,
-// mutated and exhaustively single-byte-mutated inputs, valid and invalid, and
-// the results are compared completely: Format code, every tm_t field (bitwise,
-// including the partial writes left by a failing parse), exception message,
-// and formatted strings.
+// Every public entry point is fed random, grammar-based, mutated and
+// exhaustively single-byte-mutated inputs, valid and invalid, and the results
+// are compared completely: Format code, every tm_t field (bitwise, including the
+// partial writes left by a failing parse), exception message, and formatted
+// strings.
 //
-// Deliberate differences from the original (owner-authorized correctness fixes).
-// Each one is an explicit input class; outside the classes old == new is
-// enforced completely (verdicts, every tm_t field, exception text, formats):
-//  1. Negative hour/min/sec ("2020-01-02T-3:04:05"): the filling overload
-//     Iso8601Parser(str, tm) accepted it, the validating one rejected it.
-//     Now both return OUT_OF_RANGE.
+// The reference and the library differ on six explicit input classes (the
+// reference carries bugs the library fixes). Outside them reference == library
+// is enforced completely (verdicts, every tm_t field, exception text, formats):
+//  1. Negative hour/min/sec ("2020-01-02T-3:04:05"): the reference's filling
+//     overload Iso8601Parser(str, tm) accepts it and its validating one rejects
+//     it. The library returns OUT_OF_RANGE from both.
 //  2. A fraction dot with no digits ("...:05.", "...:05.Z") or with more digits
-//     than strict_stod reads (63+): the validating overload accepted it, the
-//     filling one returned ERROR. Now both return ERROR.
-//  3. Loose-format strings ending in Z ("2020/01/02 03:04:05Z") always threw
-//     "Invalid format in Datetime Math unit: 'h'. '' must be numeric". Now Z is
-//     UTC (is_utc = true), as on the ISO path.
-//  4. computeDateMath overflowed int on huge +N terms (UB in the original):
-//     now 64-bit with a "Year is out of range" error. The frozen copy cannot be
-//     run on those inputs, so test/datemath_test.cc checks them against a
+//     than strict_stod reads (63+): the reference's validating overload accepts
+//     it and its filling one returns ERROR. The library returns ERROR from both.
+//  3. Loose-format strings ending in Z ("2020/01/02 03:04:05Z"): the reference
+//     always throws "Invalid format in Datetime Math unit: 'h'. '' must be
+//     numeric". The library parses Z as UTC (is_utc = true), as on the ISO path.
+//  4. computeDateMath with huge +N terms: the reference overflows int (UB); the
+//     library is 64-bit with a "Year is out of range" error. The reference cannot
+//     be run on those inputs, so test/datemath_test.cc checks them against a
 //     days-from-civil reference instead, and overflow_prone() skips them here.
-//  5. A month that is a multiple of 12 above 12 ("2020-12-15||+12M") made
-//     normalizeMonths yield month 0 and the old code threw "Month must be in
-//     1..12". Now it is month 12 of the right year. Oracle: the month
+//  5. A month that is a multiple of 12 above 12 ("2020-12-15||+12M"): the
+//     reference's normalizeMonths yields month 0 and it throws "Month must be in
+//     1..12". The library yields month 12 of the right year. Oracle: the month
 //     arithmetic model in ref.h (single terms), and for chains/parsers that the
-//     new code never throws that message; test/datemath_test.cc checks all
+//     library never throws that message; a base tm_t whose month is a multiple
+//     of 12 above 12 that throws in both is compared with the reference on the
+//     base with the month already normalized. test/datemath_test.cc checks all
 //     start months and N in -240..240 exhaustively.
-//  6. A loose-format offset ("2020/01/02 03:04:05+05:30") now sets is_utc, as
-//     the ISO path does for an applied offset. Oracle: the old result with
-//     is_utc forced true.
+//  6. A loose-format offset ("2020/01/02 03:04:05+05:30"): the library sets
+//     is_utc, as the ISO path does for an applied offset. Oracle: the
+//     reference's result with is_utc forced true.
 // The oracle for 1 and 2 is ref_iso() below, a reference verdict written from
-// the grammar; it is cross-checked against the original everywhere the two
-// agree, and against both new overloads everywhere. The oracle for 3 is the
-// original parsing the same string with "+00:00" instead of "Z", plus is_utc.
+// the grammar; it is cross-checked against the reference implementation
+// everywhere the two agree, and against both library overloads everywhere. The
+// oracle for 3 is the reference parsing the same string with "+00:00" instead of
+// "Z", plus is_utc.
 //
-// Still preserved on purpose:
+// Equal on purpose:
 //  - Fields accept strtoul's leading whitespace and sign ("+5", " 5").
 //  - Iso8601Parser can throw ("Year is out of range") for year 1 with an offset
-//    that moves the instant before 0001-01-01, despite returning a Format. That
-//    is legitimate: the instant is outside the supported years.
+//    that moves the instant before 0001-01-01, despite returning a Format. The
+//    instant is outside the supported years.
 //
 // Usage: datetime_diff_test [iterations [seed]]   (default 300000 per random family)
 #include <bit>

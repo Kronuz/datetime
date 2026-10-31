@@ -5,14 +5,14 @@ include(FetchContent)
 
 # --- Dependencies ---
 # datetime.cc parses numbers out of date/time strings with the strict strto*
-# wrappers (strict_stoi / strict_stoul / strict_stod) from the already-extracted
+# wrappers (strict_stoi / strict_stoul / strict_stod) from the
 # strict-stox library. That is the pure core's only third-party dependency:
-# FetchContent pulls it in at the SHA datetime was extracted against and puts
+# FetchContent pulls it in at the SHA datetime builds against and puts
 # strict_stox.hh on the include path so `#include "strict_stox.hh"` resolves.
 #
-# Note: the hashes / perfect-hash (phf) machinery used by the original Xapiand
-# datetime.cc lived entirely in the MsgPack structured-object path, which is NOT
-# part of this library (it stays in Xapiand as glue). So the pure core needs only
+# The hashes / perfect-hash (phf) machinery of Xapiand's datetime.cc lives
+# entirely in the MsgPack structured-object path, which is not part of this
+# library (it stays in Xapiand as glue). So the pure core needs only
 # strict-stox, not hashes.
 FetchContent_Declare(
   strict_stox
@@ -43,7 +43,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(datetime_test PRIVATE datetime)
   add_test(NAME datetime COMMAND datetime_test)
 
-  # Differential test against the frozen original implementation (test/old,
+  # Differential test against the frozen reference implementation (test/old,
   # namespace DatetimeOld): random, mutated and exhaustive inputs, valid and
   # invalid, compared field by field. Argument: iterations per random family.
   add_executable(datetime_diff_test test/diff_test.cc test/old/datetime_old.cc)
@@ -57,7 +57,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(datetime_datemath_test PRIVATE datetime)
   add_test(NAME datetime_datemath COMMAND datetime_datemath_test 20000)
 
-  # Benchmark against the frozen original (no external comparators needed):
+  # Benchmark against the frozen reference (no external comparators needed):
   #   cmake -B build -DDATETIME_BUILD_BENCH=ON -DCMAKE_BUILD_TYPE=Release
   option(DATETIME_BUILD_BENCH "Build the old-vs-new benchmark" OFF)
   if(DATETIME_BUILD_BENCH)

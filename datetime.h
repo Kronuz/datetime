@@ -41,10 +41,9 @@ constexpr double DATETIME_MILLISECONDS  = 1e3;
 constexpr double DATETIME_MAX_FSEC      = 0.999999;
 
 
-// Exception hierarchy. Decoupled from Xapiand's ClientError/located-exception:
-// these derive from std::runtime_error and carry a plain message string. The
-// names and the message-string constructors match the originals so existing
-// `catch (const DatetimeError&)` / `catch (const TimeError&)` sites keep working.
+// Exception hierarchy: these derive from std::runtime_error and carry a plain
+// message string. The names and the message-string constructors match Xapiand's,
+// so `catch (const DatetimeError&)` / `catch (const TimeError&)` sites work.
 class DatetimeError : public std::runtime_error {
 public:
 	explicit DatetimeError(const std::string& message) : std::runtime_error(message) { }

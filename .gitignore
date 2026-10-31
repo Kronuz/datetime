@@ -1,4 +1,5 @@
 build/
+dbg/
 *.o
 *.a
 *.out

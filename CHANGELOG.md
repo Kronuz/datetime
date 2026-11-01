@@ -83,10 +83,14 @@ releases, so entries are dated.
   interleaved rounds under `quiet strict`): on the M4 Pro `toordinal` 3.1 -> 1.8 ns,
   `timegm(tm_t)` 4.7 -> 3.0 ns, `timestamp(tm_t)` 4.4 -> 2.9 ns; on the i9 5.7 ->
   3.4 ns, 9.0 -> 5.1 ns and 11.2 -> 6.9 ns. The other rows of `bench/bench.cc` are the
-  same before and after within about 4% on both machines (date math, `...||+1d/d`, 55
-  ns on the M4 Pro and 98 ns on the i9, calls `timegm`); `parse ...+hh:mm` is 1 ns
-  slower on the M4 Pro (29.5 -> 30.6 ns) on code this change does not touch, with the
-  frozen original in the same binary unchanged.
+  same before and after within 3% on both machines (date math, `...||+1d/d`, 54 ns on
+  the M4 Pro and 98 ns on the i9, calls `timegm`), except two on paths this change does
+  not touch: `parse ...+hh:mm` on the M4 Pro (28.4 -> 30.1 ns) and
+  `parse 2020/01/02 03:04:05` on the i9 (39.8 -> 44.7 ns, 17.4 -> 17.3 on the M4 Pro).
+  The frozen original in the same binary does not move, and a variant that kept
+  `parse_fsec` as it was and put the digit limit at its two callers moved the same two
+  rows by a similar amount (and `parse .ffffffZ` by 7% on the i9), so the cost follows
+  the layout of the scanner functions, not their code.
 - The seven-digit-and-longer fraction path of `parse_fsec` is a separate function that
   is not inlined, so the microsecond path stays as small as it was where it is inlined
   into the scanner (`parse .ffffffZ` was 7% slower on the i9 before the split).

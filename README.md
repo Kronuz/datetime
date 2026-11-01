@@ -75,11 +75,19 @@ Not for:
 
 ## ⚡ Performance
 
-`datetime_compare` times each entry point against independent implementations: a hand-written
-ISO 8601 parser and formatter that reads one grammar and reports failure with a bool, the
-days-from-civil and civil-from-days algorithms, libc `strptime` + `timegm`, and abseil 20260817's
-`ParseTime`, `FromCivil` and `FormatTime`. ns per call, one thread, 4,096 random inputs, best of
-two runs of seven passes, Apple clang 17 with `-O3`:
+`datetime_compare` times each entry point against independent implementations of the same work:
+*hand* is a hand-written ISO 8601 parser and formatter (in `bench/compare.cc`) that reads one
+grammar and reports failure with a bool; *days-from-civil* and *civil-from-days* are the
+calendar algorithms of
+[Howard Hinnant](https://howardhinnant.github.io/date_algorithms.html), written out in the
+benchmark; *`strptime`+`timegm`* is libc's; *absl* is
+[abseil](https://github.com/abseil/abseil-cpp/releases/tag/20260817.0) 20260817.0
+(`ParseTime`, `FromCivil`, `FormatTime`, Homebrew). `datetime_compare --check` (CTest
+`datetime_compare`) requires each comparator to return the library's values on the benchmark's
+inputs; abseil's `FormatTime` writes no fraction, so its row compares the time only. ns per call,
+one thread, 4,096 random inputs, best of two runs of seven passes, Apple clang 17 with `-O3`, on
+an Apple M4 Pro (macOS 26, arm64) and an Intel Core i9-9980HK (macOS 15, x86-64). The machine
+columns hold `datetime`'s ns and the `comparators` columns the comparators' ns; lower is faster.
 
 | Operation | Apple M4 Pro | comparators | Intel Core i9-9980HK | comparators |
 | :-- | --: | :-- | --: | :-- |
@@ -95,9 +103,8 @@ two runs of seven passes, Apple clang 17 with `-O3`:
 
 `datetime` takes 1.2x to 3.2x the hand-written parser's time, for the loose forms, offsets, date
 math, field validation and error reports the hand parser lacks, and about a sixth of abseil's
-`ParseTime`. abseil's `FormatTime` writes no fraction, so its row compares time only. Repeated
-runs spread under 3% for most rows, up to 8% for two parse rows on the M4 Pro and 30% for
-`iso8601` on the i9.
+`ParseTime`. Repeated runs spread under 3% for most rows, up to 8% for two parse rows on the M4
+Pro and 30% for `iso8601` on the i9.
 
 ```sh
 cmake -B build -DDATETIME_BUILD_BENCH=ON -DCMAKE_BUILD_TYPE=Release && cmake --build build

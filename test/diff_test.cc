@@ -70,6 +70,26 @@ static std::uint64_t failures = 0;
 static std::uint64_t rnd(std::uint64_t n) { return rng() % n; }
 static bool chance(unsigned pct) { return rnd(100) < pct; }
 
+// A digest of every input the test generates. The inputs must not depend on the compiler:
+// an expression with two draws in unsequenced operands (function arguments, the operands of
+// `+`) decides at the compiler's whim which draw goes where. The digest is printed and,
+// for the default run, compared with the recorded one, so two toolchains that generate
+// different inputs fail instead of testing different things.
+static std::uint64_t digest = 0xcbf29ce484222325ULL;
+// The digest of the default run, `datetime_diff_test 20000`.
+static constexpr std::uint64_t expected_digest_20000 = 0xf96573b230c52919ULL;
+static void feed_u(std::uint64_t v) { digest = (digest ^ v) * 0x100000001b3ULL; }
+static void feed_s(std::string_view s) {
+	for (unsigned char c : s) { feed_u(c); }
+	feed_u(s.size() | (std::uint64_t{1} << 63));
+}
+template <typename T>
+static void feed_tm(const T& t) {
+	for (int v : { t.year, t.mon, t.day, t.hour, t.min, t.sec }) { feed_u(static_cast<std::uint32_t>(v)); }
+	feed_u(std::bit_cast<std::uint64_t>(t.fsec));
+	feed_u(t.is_utc);
+}
+
 static std::string show(const std::string& s) {
 	std::string r = "\"";
 	for (unsigned char c : s) {
@@ -240,6 +260,7 @@ static std::uint64_t class_neg = 0, class_frac = 0, class_z = 0, class_month = 0
 static const char* const month_msg = "Month must be in 1..12";
 
 static void check_string(const std::string& s) {
+	feed_s(s);
 	if (overflow_prone(s)) { return; }
 	std::string_view sv(s);
 
@@ -350,8 +371,18 @@ static std::string gen_math() {
 		switch (rnd(4)) {
 			case 0: m += "/"; break;
 			case 1: m += "//"; break;
-			case 2: m += (chance(50) ? "+" : "-") + (chance(5) ? "1" + digits(10 + static_cast<int>(rnd(3))) : digits(1 + static_cast<int>(rnd(3)))); break;
-			default: m += (chance(50) ? "+" : "-") + std::to_string(rnd(40)); break;
+			case 2: {
+				const char* sign = chance(50) ? "+" : "-";
+				const std::string number = chance(5) ? "1" + digits(10 + static_cast<int>(rnd(3))) : digits(1 + static_cast<int>(rnd(3)));
+				m += sign + number;
+				break;
+			}
+			default: {
+				const char* sign = chance(50) ? "+" : "-";
+				const std::string number = std::to_string(rnd(40));
+				m += sign + number;
+				break;
+			}
 		}
 		m += "dyMwhmsx"[rnd(chance(97) ? 7 : 8)];
 	}
@@ -407,7 +438,10 @@ static std::string gen_date() {
 	}
 	s += gen_tz();
 	if (chance(25)) {
-		s += std::string(rnd(3), ' ') + "||" + std::string(rnd(3), ' ') + gen_math();
+		// Each draw is its own statement: operands of `+` and call arguments are unsequenced.
+		const std::string before_bars(rnd(3), ' ');
+		const std::string after_bars(rnd(3), ' ');
+		s += before_bars + "||" + after_bars + gen_math();
 	}
 	return s;
 }
@@ -416,11 +450,11 @@ static std::string mutate(std::string s) {
 	int n = 1 + (chance(30) ? static_cast<int>(rnd(3)) : 0);
 	for (int i = 0; i < n; ++i) {
 		switch (rnd(5)) {
-			case 0: if (!s.empty()) { s[rnd(s.size())] = rand_char(); } break;
+			case 0: if (!s.empty()) { const std::size_t at = rnd(s.size()); s[at] = rand_char(); } break;
 			case 1: if (!s.empty()) { s.erase(rnd(s.size()), 1); } break;
-			case 2: s.insert(rnd(s.size() + 1), 1, rand_char()); break;
+			case 2: { const std::size_t at = rnd(s.size() + 1); s.insert(at, 1, rand_char()); break; }
 			case 3: if (!s.empty()) { s.resize(rnd(s.size())); } break;
-			default: if (!s.empty()) { s[rnd(s.size())] = static_cast<char>(rnd(256)); } break;
+			default: if (!s.empty()) { const std::size_t at = rnd(s.size()); s[at] = static_cast<char>(rnd(256)); } break;
 		}
 	}
 	return s;
@@ -549,6 +583,7 @@ static void calendar() {
 
 
 static void check_math(const Datetime::tm_t& base, const std::string& math, bool direct_op, char unit) {
+	feed_tm(base); feed_s(math); feed_u(direct_op); feed_u(static_cast<unsigned char>(unit));
 	if (overflow_prone(math)) { return; }
 	auto mk = [&](auto& t) { t.year = base.year; t.mon = base.mon; t.day = base.day; t.hour = base.hour; t.min = base.min; t.sec = base.sec; t.fsec = base.fsec; t.is_utc = base.is_utc; };
 	const std::string label = math + " unit=" + unit + " base=" + show(pack(base));
@@ -622,7 +657,9 @@ static void math_tests(std::uint64_t n) {
 		check_math(base, op, true, "ydMwhmsx"[rnd(8)]);
 		// numeric edge digits
 		static const char* nums[] = { "0", "00", "2147483648", "99999999999999999999", "-0", "+5", " 5", "1e3", "18446744073709551621", "18446744073709551616", "4294967301" };
-		std::string o2 = std::string(chance(50) ? "+" : "-") + nums[rnd(11)];
+		const char* o2_sign = chance(50) ? "+" : "-";
+		const char* o2_digits = nums[rnd(11)];
+		std::string o2 = std::string(o2_sign) + o2_digits;
 		check_math(base, o2, true, "ydMhms"[rnd(6)]);
 		std::string zeros = std::string(chance(50) ? "+" : "-") + std::string(62, '0') + "1";
 		check_math(base, zeros, true, 'd');
@@ -641,6 +678,7 @@ static void tz_tests(std::uint64_t n) {
 		};
 		std::string h = word(), m = word();
 		char op = "+-x"[rnd(3)];
+		feed_tm(base); feed_s(h); feed_s(m); feed_u(static_cast<unsigned char>(op));
 		++checks;
 		auto fo = run([&] { DatetimeOld::tm_t t; t.year = base.year; t.mon = base.mon; t.day = base.day; t.hour = base.hour; t.min = base.min; t.sec = base.sec; t.fsec = base.fsec; t.is_utc = base.is_utc; std::string r; try { DatetimeOld::computeTimeZone(t, op, h, m); } catch (const std::exception& e) { r = std::string("throw ") + e.what() + " "; } return r + show(pack(t)); });
 		auto fn = run([&] { Datetime::tm_t t = base; std::string r; try { Datetime::computeTimeZone(t, op, h, m); } catch (const std::exception& e) { r = std::string("throw ") + e.what() + " "; } return r + show(pack(t)); });
@@ -656,6 +694,7 @@ static void tz_tests(std::uint64_t n) {
 
 
 static void format_check(const Datetime::tm_t& tm, bool trim, char sep) {
+	feed_tm(tm); feed_u(trim); feed_u(static_cast<unsigned char>(sep));
 	DatetimeOld::tm_t o;
 	o.year = tm.year; o.mon = tm.mon; o.day = tm.day; o.hour = tm.hour; o.min = tm.min; o.sec = tm.sec; o.fsec = tm.fsec; o.is_utc = tm.is_utc;
 	compare("iso8601(tm_t)", show(pack(tm)) + (trim ? " trim" : " full") + " sep=" + sep,
@@ -697,13 +736,24 @@ static void format_tests(std::uint64_t n) {
 		auto t = rand_tm(true);
 		t.year = chance(30) ? static_cast<int>(rnd(200000)) - 100000 : t.year;
 		t.hour = chance(10) ? static_cast<int>(rnd(2000)) - 1000 : t.hour;
-		t.fsec = chance(50) ? std::bit_cast<double>(rng()) : (chance(50) ? static_cast<double>(rng() >> 11) * 0x1p-53 : (rng() >> 11) * 0x1p-53 * (chance(20) ? 3 : 1));
-		format_check(t, chance(50), "T x"[rnd(3)]);
+		if (chance(50)) {
+			t.fsec = std::bit_cast<double>(rng());
+		} else if (chance(50)) {
+			t.fsec = static_cast<double>(rng() >> 11) * 0x1p-53;
+		} else {
+			const double unit = static_cast<double>(rng() >> 11) * 0x1p-53;
+			t.fsec = unit * (chance(20) ? 3 : 1);
+		}
+		const bool fmt_trim = chance(50);
+		const char sep = "T x"[rnd(3)];
+		format_check(t, fmt_trim, sep);
 		// std::tm
 		std::tm a{};
 		a.tm_year = static_cast<int>(rnd(300000)) - 150000; a.tm_mon = static_cast<int>(rnd(14)) - 1; a.tm_mday = static_cast<int>(rnd(40)) - 3;
 		a.tm_hour = static_cast<int>(rnd(30)) - 3; a.tm_min = static_cast<int>(rnd(70)) - 5; a.tm_sec = static_cast<int>(rnd(70)) - 5;
 		bool trim = chance(50);
+		for (int v : { a.tm_year, a.tm_mon, a.tm_mday, a.tm_hour, a.tm_min, a.tm_sec }) { feed_u(static_cast<std::uint32_t>(v)); }
+		feed_u(trim);
 		compare("iso8601(std::tm)", std::to_string(a.tm_year) + "," + std::to_string(a.tm_mon) + "," + std::to_string(a.tm_mday) + (trim ? " trim" : " full"),
 			run([&] { return DatetimeOld::iso8601(a, trim, 'T'); }), run([&] { return Datetime::iso8601(a, trim, 'T'); }));
 	}
@@ -712,11 +762,13 @@ static void format_tests(std::uint64_t n) {
 
 static void tm_tests(std::uint64_t n) {
 	auto cmp_t = [&](std::int64_t t) {
+		feed_u(static_cast<std::uint64_t>(t));
 		compare("to_tm_t(time_t)", std::to_string(t),
 			run([&] { return show(pack(DatetimeOld::to_tm_t(static_cast<std::time_t>(t)))); }),
 			run([&] { return show(pack(Datetime::to_tm_t(static_cast<std::time_t>(t)))); }));
 	};
 	auto cmp_d = [&](double t) {
+		feed_u(std::bit_cast<std::uint64_t>(t));
 		char b[64];
 		std::snprintf(b, sizeof(b), "%.17g", t);
 		compare("to_tm_t(double)", b,
@@ -763,6 +815,14 @@ int main(int argc, char** argv) {
 		static_cast<unsigned long long>(class_neg), static_cast<unsigned long long>(class_frac), static_cast<unsigned long long>(class_z));
 	std::printf("                    month %llu, loose offset %llu\n", static_cast<unsigned long long>(class_month), static_cast<unsigned long long>(class_off));
 	if (class_neg == 0 || class_frac == 0 || class_z == 0 || class_month == 0 || class_off == 0) { std::printf("a changed class was never exercised\n"); ++failures; }
-	std::printf("%llu checks, %llu mismatches\n", static_cast<unsigned long long>(checks), static_cast<unsigned long long>(failures));
+	std::printf("%llu checks, %llu mismatches, input digest %016llx\n", static_cast<unsigned long long>(checks), static_cast<unsigned long long>(failures),
+		static_cast<unsigned long long>(digest));
+	// The default CTest run (20000 iterations, the default seed) generates a recorded set of inputs.
+	// A different digest means the generator changed (update the constant) or a draw depends on the
+	// compiler (an expression with two draws in unsequenced operands).
+	if (argc == 2 && n == 20000 && digest != expected_digest_20000) {
+		std::printf("the generated inputs differ from the recorded digest %016llx\n", static_cast<unsigned long long>(expected_digest_20000));
+		++failures;
+	}
 	return failures == 0 ? 0 : 1;
 }

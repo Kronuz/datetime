@@ -22,7 +22,6 @@ CMakeLists.txt               STATIC library `datetime` (+ alias datetime::dateti
 LICENSE                      MIT, Copyright (c) 2015-2019 Dubalu LLC.
 README.md                    What it is, install, quick start.
 docs/API.md                  Usage, scope, and everything it parses and formats.
-docs/datetime.d2             The README diagram's source (docs/datetime.svg is rendered from it).
 ARCHITECTURE.md              Parse paths, numeric core, how the library differs from Xapiand.
 ```
 

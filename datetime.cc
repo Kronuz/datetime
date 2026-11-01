@@ -196,11 +196,17 @@ static inline bool field(const char* p, int n, int& v, bool& wrap) {
 	return true;
 }
 
+// The widths of the grammar. They are datetime's own: every scanner checks them before a
+// field reaches strict-stox, so the verdicts do not depend on how wide a field strict-stox
+// reads.
+static constexpr std::size_t MAX_FRACTION_DIGITS = 62;  // a fraction has 1 to 62 digits
+static constexpr std::size_t MAX_TERM_CHARS = 63;       // the number of a date-math term, sign excluded
+
 // A fraction of 7 to 62 digits: strict_stod + normalize_fsec. Zero digits, or 63 or more,
-// is not a fraction, whatever the size of strict_stod's buffer. Out of line, so the
-// microsecond path below stays small where it is inlined.
+// is not a fraction. Out of line, so the microsecond path below stays small where it is
+// inlined.
 [[gnu::noinline]] static bool parse_fsec_long(const char* digits, std::size_t nd, double& out) {
-	if (nd < 1 || nd > 62) { return false; }
+	if (nd < 1 || nd > MAX_FRACTION_DIGITS) { return false; }
 	std::string buf;
 	buf.reserve(nd + 1);
 	buf.push_back('.');
@@ -225,6 +231,17 @@ static inline bool parse_fsec(const char* digits, std::size_t nd, double& out) {
 		return true;
 	}
 	return parse_fsec_long(digits, nd, out);
+}
+
+// The fraction of a time or timedelta, the dot and then digits only: 1 to MAX_FRACTION_DIGITS
+// digits, like every other fraction.
+static bool parse_dotted_fsec(std::string_view dotted, double& out) {
+	if (dotted.size() < 2 || dotted.size() - 1 > MAX_FRACTION_DIGITS) { return false; }
+	int errno_save;
+	auto fsec = strict_stod(&errno_save, dotted);
+	if (errno_save != 0) { return false; }
+	out = Datetime::normalize_fsec(fsec);
+	return true;
 }
 
 
@@ -300,8 +317,8 @@ static Datetime::Format iso8601_scan(std::string_view datetime, Datetime::tm_t* 
 	}
 
 	// The fraction: only filling needs its value; validating needs to know that
-	// parse_fsec would succeed, which is exactly 1 to 62 digits (strict_stod
-	// reads at most 63 characters, the dot included, and a digit run cannot overflow).
+	// parse_fsec would succeed, which is exactly 1 to MAX_FRACTION_DIGITS digits (a digit
+	// run cannot overflow).
 	auto fraction = [&](std::size_t nd) {
 		if constexpr (Fill) {
 			double fsec;
@@ -309,7 +326,7 @@ static Datetime::Format iso8601_scan(std::string_view datetime, Datetime::tm_t* 
 			tm->fsec = fsec;
 			return true;
 		} else {
-			return nd >= 1 && nd <= 62;
+			return nd >= 1 && nd <= MAX_FRACTION_DIGITS;
 		}
 	};
 
@@ -707,11 +724,11 @@ Datetime::computeTimeZone(tm_t& tm, char op, std::string_view hour, std::string_
 
 
 
-// What strict_stoi(str) accepted: strtol grammar (leading isspace, sign, digits)
-// consuming the whole string, at most 63 chars, result within int.
+// The number of a date-math term: strtol grammar (leading isspace, sign, digits)
+// consuming the whole string, at most MAX_TERM_CHARS chars, result within int.
 static bool parse_int(std::string_view s, int& out) {
 	const std::size_t n = s.size();
-	if (n == 0 || n > 63) { return false; }
+	if (n == 0 || n > MAX_TERM_CHARS) { return false; }
 	std::size_t i = 0;
 	while (i < n && std::isspace(static_cast<unsigned char>(s[i]))) { ++i; }
 	bool neg = false;
@@ -1374,9 +1391,9 @@ Datetime::TimeParser(std::string_view _time)
 												if (errno_save != 0) { goto error; }
 												clk.tz_m = strict_stoul(&errno_save, std::string_view(aux_end + 1, it_e - aux_end - 1));
 												if (errno_save != 0) { goto error; }
-												auto fsec = strict_stod(&errno_save, std::string_view(it, aux - it));
-												if (errno_save != 0) { goto error; }
-												clk.fsec = Datetime::normalize_fsec(fsec);
+												double fsec;
+												if (!parse_dotted_fsec(std::string_view(it, aux - it), fsec)) { goto error; }
+												clk.fsec = fsec;
 												return clk;
 											}
 										}
@@ -1387,9 +1404,9 @@ Datetime::TimeParser(std::string_view _time)
 								goto error;
 							}
 						}
-						auto fsec = strict_stod(&errno_save, std::string_view(it, it_e - it));
-						if (errno_save != 0) { goto error; }
-						clk.fsec = Datetime::normalize_fsec(fsec);
+						double fsec;
+						if (!parse_dotted_fsec(std::string_view(it, it_e - it), fsec)) { goto error; }
+						clk.fsec = fsec;
 						return clk;
 					}
 					default:
@@ -1641,9 +1658,9 @@ Datetime::TimedeltaParser(std::string_view timedelta)
 								goto error;
 							}
 						}
-						auto fsec = strict_stod(&errno_save, std::string_view(it, it_e - it));
-						if (errno_save != 0) { goto error; }
-						clk.fsec = Datetime::normalize_fsec(fsec);
+						double fsec;
+						if (!parse_dotted_fsec(std::string_view(it, it_e - it), fsec)) { goto error; }
+						clk.fsec = fsec;
 						return clk;
 					}
 					[[fallthrough]];

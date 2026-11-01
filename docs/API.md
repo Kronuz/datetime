@@ -47,6 +47,13 @@ Behavior notes:
 - Both `Iso8601Parser` overloads return the same `Format` for every input. A
   negative or out-of-range hour/minute/second is `OUT_OF_RANGE`; a fraction needs
   1 to 62 digits (`...:05.` and `...:05.Z` are `ERROR`).
+- A field wider than the grammar is invalid, whatever its value: a fraction has 1 to 62
+  digits in a datetime, a time and a timedelta (`DatetimeError` / `TimeError` /
+  `TimedeltaError`, "Error format in ..."), and the number of a date-math term has at most
+  63 characters, sign excluded (`+0...010d` with 64 characters is
+  `DatetimeError("Invalid format in Datetime Math unit: 'd'. '0...010' must be numeric")`).
+  A date-math number outside `int` is the same error. The library checks the widths itself, so they
+  do not depend on strict-stox.
 - A loose-format string such as `2020/01/02 03:04:05Z` ends in `Z` = UTC and sets
   `is_utc`, like the ISO form; a loose-format offset (`...05+05:30`) is applied
   and also sets `is_utc`.

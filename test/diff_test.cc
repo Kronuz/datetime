@@ -7,14 +7,15 @@
 // partial writes left by a failing parse), exception message, and formatted
 // strings.
 //
-// The reference and the library differ on seven explicit input classes (the
-// reference carries bugs the library fixes). Outside them reference == library
+// The reference and the library differ on eight explicit input classes (the
+// reference carries bugs the library fixes, or rides a width limit of strict-stox
+// that the library does not). Outside them reference == library
 // is enforced completely (verdicts, every tm_t field, exception text, formats):
 //  1. Negative hour/min/sec ("2020-01-02T-3:04:05"): the reference's filling
 //     overload Iso8601Parser(str, tm) accepts it and its validating one rejects
 //     it. The library returns OUT_OF_RANGE from both.
 //  2. A fraction dot with no digits ("...:05.", "...:05.Z") or with more digits
-//     than strict_stod reads (63+): the reference's validating overload accepts
+//     than a fraction has (63+): the reference's validating overload accepts
 //     it and its filling one returns ERROR. The library returns ERROR from both.
 //  3. Loose-format strings ending in Z ("2020/01/02 03:04:05Z"): the reference
 //     always throws "Invalid format in Datetime Math unit: 'h'. '' must be
@@ -40,6 +41,18 @@
 //     its fraction. The library adds the fraction (-1.1) and floors. Oracle: the reference
 //     calendar (ref.h) for the whole seconds, and the reference's own whole seconds plus or
 //     minus the fraction for `timestamp`.
+//  8. A numeric field wider than the grammar allows: the number of a date-math term has at
+//     most 63 characters (sign excluded) and a fraction, in a datetime, a time or a
+//     timedelta, 1 to 62 digits. Wider is invalid (DatetimeError "... must be numeric",
+//     "Error format in ..."). The library checks the widths itself, before a field reaches
+//     strict-stox. The reference calls strict-stox with the field, so its verdict is
+//     whatever strict-stox's width was: strict-stox up to 21b7941 read 63 bytes and rejected
+//     the rest (so reference == library), strict-stox from c1c9bc1 reads any width and the
+//     reference accepts "+000...0010d" (64 characters, the value 10) and a 63-digit
+//     fraction (so reference != library). No assertion is made about the reference
+//     there; the library must equal the oracle on both pins. Oracle: the widths above, as
+//     written in docs/API.md (the constants below are the test's own copy), the reference
+//     on the terms before a wide one, and the reference's exception text.
 // The oracle for 1 and 2 is ref_iso() below, a reference verdict written from
 // the grammar; it is cross-checked against the reference implementation
 // everywhere the two agree, and against both library overloads everywhere. The
@@ -83,7 +96,7 @@ static bool chance(unsigned pct) { return rnd(100) < pct; }
 // different inputs fail instead of testing different things.
 static std::uint64_t digest = 0xcbf29ce484222325ULL;
 // The digest of the default run, `datetime_diff_test 20000`.
-static constexpr std::uint64_t expected_digest_20000 = 0x8fb7519b57f3ad14ULL;
+static constexpr std::uint64_t expected_digest_20000 = 0x18108c912bb7bf46ULL;
 static void feed_u(std::uint64_t v) { digest = (digest ^ v) * 0x100000001b3ULL; }
 static void feed_s(std::string_view s) {
 	for (unsigned char c : s) { feed_u(c); }
@@ -103,6 +116,12 @@ static std::string show(const std::string& s) {
 		else { char b[8]; std::snprintf(b, sizeof(b), "\\x%02x", c); r += b; }
 	}
 	return r + "\"";
+}
+
+// An exception message as what() returns it: a C string, so it ends at the first NUL.
+static std::string as_what(std::string m) {
+	m.resize(std::strlen(m.c_str()));
+	return m;
 }
 
 static void fail(const char* what, const std::string& input, const std::string& detail) {
@@ -190,12 +209,38 @@ static bool overflow_prone(const std::string& s) {
 
 using Fmt = Datetime::Format;
 
+// Class 8: the widths of the grammar, as docs/API.md states them (the test's own copy).
+static constexpr std::size_t grammar_term_chars = 63;       // the number of a date-math term, sign excluded
+static constexpr std::size_t grammar_fraction_digits = 62;  // a fraction has 1 to 62 digits
+static std::uint64_t class_wide_term = 0, class_wide_frac = 0;
+
+// Whether a fraction separator in `s` is followed by more digits than a fraction has.
+static bool wide_fraction(std::string_view s) {
+	for (std::size_t i = 0; i < s.size(); ++i) {
+		if (s[i] != '.' && s[i] != ',') { continue; }
+		std::size_t j = i + 1;
+		while (j < s.size() && s[j] >= '0' && s[j] <= '9') { ++j; }
+		if (j - i - 1 > grammar_fraction_digits) { return true; }
+	}
+	return false;
+}
+
+// Whether `s` has a run of digits longer than the number of a date-math term.
+static bool wide_term_digits(std::string_view s) {
+	std::size_t run = 0;
+	for (char c : s) {
+		run = c >= '0' && c <= '9' ? run + 1 : 0;
+		if (run > grammar_term_chars) { return true; }
+	}
+	return false;
+}
+
 // Reference ISO 8601 verdict, from the grammar (shape keyed on the length, as
 // the documented formats are):
 //   YYYY-MM-DD | YYYY-MM-DD(T| )hh:mm:ss[Z | .f+[Z|+hh:mm|-hh:mm] | +hh:mm | -hh:mm]
 // A field is strtoul-style (optional whitespace and sign, then digits only).
 // Every field must be in range (a negative one is out of range) and a
-// fraction needs 1..62 digits (the most strict_stod reads).
+// fraction needs 1..62 digits.
 static bool ref_field(std::string_view s, std::size_t pos, std::size_t n, int& v) {
 	std::size_t i = pos, end = pos + n;
 	while (i < end && (s[i] == ' ' || (s[i] >= '\t' && s[i] <= '\r'))) { ++i; }
@@ -259,7 +304,7 @@ static Fmt ref_iso(std::string_view s) {
 		}
 	}
 	if (rest != Fmt::VALID) { return rest; }
-	return nd >= 1 && nd <= 62 ? Fmt::VALID : Fmt::ERROR;
+	return nd >= 1 && nd <= grammar_fraction_digits ? Fmt::VALID : Fmt::ERROR;
 }
 
 static std::uint64_t class_neg = 0, class_frac = 0, class_z = 0, class_month = 0, class_off = 0, class_pre = 0;
@@ -318,6 +363,14 @@ static void check_string(const std::string& s) {
 		++checks;
 		const std::string want = pref == Fmt::ERROR ? "Error format in _datetime: " + s : "Datetime: " + s + " is out of range";
 		if (!new_dp.threw || new_dp.msg != want) { fail("DatetimeParser changed class", s, "new=[" + (new_dp.threw ? new_dp.msg : new_dp.payload) + "]"); }
+	} else if (pref == Fmt::INVALID && wide_fraction(prefix)) {
+		// Class 8: a loose-format fraction wider than 62 digits is not a datetime. The reference's
+		// answer depends on strict-stox's width, so only the oracle is checked.
+		++class_wide_frac;
+		++checks;
+		if (!new_dp.threw || (new_dp.msg != as_what("Error format in _datetime: " + s) && new_dp.msg != as_what("Datetime: " + s + " is out of range"))) {
+			fail("DatetimeParser wide fraction", s, "new=[" + (new_dp.threw ? new_dp.msg : new_dp.payload) + "]");
+		}
 	} else if (old_dp.threw && old_dp.msg == zmsg) {
 		// Class 3: oracle is the original on the "+00:00" spelling, with is_utc.
 		++class_z;
@@ -596,6 +649,16 @@ static void check_math(const Datetime::tm_t& base, const std::string& math, bool
 	auto old_o = run([&] { DatetimeOld::tm_t t; mk(t); std::string r; try { if (direct_op) DatetimeOld::computeDateMath(t, math, unit); else DatetimeOld::processDateMath(math, t); } catch (const std::exception& e) { r = std::string("throw ") + e.what() + " "; } return r + show(pack(t)); });
 	auto new_o = run([&] { Datetime::tm_t t; mk(t); std::string r; try { if (direct_op) Datetime::computeDateMath(t, math, unit); else Datetime::processDateMath(math, t); } catch (const std::exception& e) { r = std::string("throw ") + e.what() + " "; } return r + show(pack(t)); });
 	const std::string month_throw = std::string("throw ") + month_msg + " ";
+	if (direct_op ? math.size() > grammar_term_chars + 1 && (math[0] == '+' || math[0] == '-') : wide_term_digits(math)) {
+		// Class 8: the number of a term is at most 63 characters. The reference's answer depends on
+		// strict-stox's width, so only the oracle is checked: a direct term fails as non-numeric
+		// and leaves the tm_t alone; a chain throws.
+		++class_wide_term;
+		++checks;
+		const std::string want = "throw Invalid format in Datetime Math unit: '" + std::string(1, unit) + "'. '" + math.substr(1) + "' must be numeric " + show(pack(base));
+		if (direct_op ? new_o.payload != want : new_o.payload.rfind("throw ", 0) != 0) { fail("math wide term", label, "new=[" + new_o.payload + "]"); }
+		return;
+	}
 	const bool base_month_ok = base.mon >= 1 && base.mon <= 12;
 	if (old_o.payload.rfind(month_throw, 0) == 0 && (base_month_ok || old_o.payload != new_o.payload)) {
 		// (A base month outside 1..12 can legitimately throw it in both, e.g. "/M".)
@@ -695,6 +758,163 @@ static void tz_tests(std::uint64_t n) {
 			continue;
 		}
 		compare("computeTimeZone", std::string(1, op) + "|" + h + "|" + m + "| base=" + show(pack(base)), fo, fn);
+	}
+}
+
+
+// Class 8, date math: terms at and over the width limit, alone and after valid terms.
+static void wide_terms() {
+	Datetime::tm_t bases[4];
+	const int vals[4][6] = { { 2021, 3, 14, 15, 9, 26 }, { 1, 1, 1, 0, 0, 0 }, { 9999, 12, 31, 23, 59, 59 }, { 1970, 2, 28, 12, 0, 0 } };
+	for (int k = 0; k < 4; ++k) {
+		bases[k].year = vals[k][0]; bases[k].mon = vals[k][1]; bases[k].day = vals[k][2];
+		bases[k].hour = vals[k][3]; bases[k].min = vals[k][4]; bases[k].sec = vals[k][5];
+		bases[k].fsec = k % 2 ? 0.0 : 0.25;
+		bases[k].is_utc = k < 2;
+	}
+	const std::size_t widths[] = { 1, 2, 62, 63, 64, 65, 100, 1000 };
+	for (const auto& base : bases) {
+		for (std::size_t w : widths) {
+			// Same value at every width: 1, 10 (leading zeros), 5 behind leading spaces, a value over int, and 9s.
+			std::string texts[5];
+			texts[0] = std::string(w - 1, '0') + "1";
+			texts[1] = w >= 2 ? std::string(w - 2, '0') + "10" : "7";
+			texts[2] = w >= 2 ? std::string(w - 1, ' ') + "5" : "5";
+			texts[3] = "1" + std::string(w - 1, '0');
+			texts[4] = std::string(w, '9');
+			for (const auto& text : texts) {
+				for (const char* sign : { "+", "-" }) {
+					for (char unit : { 'd', 'y', 'M', 'w', 'h', 'm', 's', 'x' }) {
+						check_math(base, sign + text, true, unit);
+					}
+				}
+			}
+			// A chain: the terms before the wide one apply, then it throws.
+			for (const std::string& prefix : { std::string(), std::string("+1d"), std::string("/M"), std::string("-3h//y"), std::string("+2y-1M") }) {
+				for (const char* sign : { "+", "-" }) {
+					for (char unit : { 'd', 'y', 'M', 'w', 'h', 'm', 's' }) {
+						const std::string text = std::string(w - 1, '0') + "1";
+						const std::string chain = prefix + sign + text + unit;
+						check_math(base, chain, false, 0);
+						if (w <= grammar_term_chars) { continue; }
+						// The oracle: the reference on the terms before the wide one, then the throw.
+						auto before = run([&] {
+							DatetimeOld::tm_t t; t.year = base.year; t.mon = base.mon; t.day = base.day; t.hour = base.hour; t.min = base.min; t.sec = base.sec; t.fsec = base.fsec; t.is_utc = base.is_utc;
+							std::string r;
+							try { DatetimeOld::processDateMath(prefix, t); r = "throw Invalid format in Datetime Math unit: '" + std::string(1, unit) + "'. '" + text + "' must be numeric "; } catch (const std::exception& e) { r = std::string("throw ") + e.what() + " "; }
+							return r + show(pack(t));
+						});
+						auto got = run([&] {
+							Datetime::tm_t t = base;
+							std::string r;
+							try { Datetime::processDateMath(chain, t); r = "no throw "; } catch (const std::exception& e) { r = std::string("throw ") + e.what() + " "; }
+							return r + show(pack(t));
+						});
+						compare("processDateMath wide term", chain + " base=" + show(pack(base)), before, got);
+					}
+				}
+			}
+		}
+	}
+}
+
+
+template <typename C>
+static std::string show_clk(const C& c) {
+	char b[160];
+	std::snprintf(b, sizeof(b), "{%d:%d:%d fsec=%016llx tz=%d/%d:%d}", c.hour, c.min, c.sec,
+		static_cast<unsigned long long>(std::bit_cast<std::uint64_t>(c.fsec)), static_cast<int>(c.tz_s), c.tz_h, c.tz_m);
+	return b;
+}
+
+// TimeParser and TimedeltaParser, the predicates isTime and isTimedelta (they check the shape, not the
+// width of a fraction). A fraction wider than 62 digits is class 8.
+static void check_time(const std::string& s, bool delta) {
+	feed_s(s);
+	feed_u(delta);
+	const std::string_view sv(s);
+	const auto old_o = run([&] { return show_clk(delta ? DatetimeOld::TimedeltaParser(sv) : DatetimeOld::TimeParser(sv)); });
+	const auto new_o = run([&] { return show_clk(delta ? Datetime::TimedeltaParser(sv) : Datetime::TimeParser(sv)); });
+	if (wide_fraction(s)) {
+		++class_wide_frac;
+		++checks;
+		const std::string want = as_what(delta ? "Error format in timedelta: " + s + ", the format must be '[+-]00:00(:00(.0...))'"
+		                                       : "Error format in time: " + s + ", the format must be '00:00(:00(.0...)([+-]00:00))'");
+		if (!new_o.threw || new_o.msg != want) { fail(delta ? "TimedeltaParser wide fraction" : "TimeParser wide fraction", s, "new=[" + (new_o.threw ? new_o.msg : new_o.payload) + "]"); }
+	} else {
+		compare(delta ? "TimedeltaParser" : "TimeParser", s, old_o, new_o);
+	}
+	compare(delta ? "isTimedelta" : "isTime", s,
+		run([&] { return std::to_string(delta ? DatetimeOld::isTimedelta(sv) : DatetimeOld::isTime(sv)); }),
+		run([&] { return std::to_string(delta ? Datetime::isTimedelta(sv) : Datetime::isTime(sv)); }));
+}
+
+static std::string gen_time(bool delta) {
+	std::string s;
+	if (delta) { s += chance(50) ? '+' : (chance(90) ? '-' : rand_char()); }
+	const int hour = static_cast<int>(rnd(chance(10) ? 120 : 24));
+	s += two(hour);
+	s += ':';
+	const int min = static_cast<int>(rnd(chance(10) ? 120 : 60));
+	s += two(min);
+	if (chance(80)) {
+		s += ':';
+		const int sec = static_cast<int>(rnd(chance(10) ? 120 : 60));
+		s += two(sec);
+		if (chance(60)) {
+			s += '.';
+			const int nd = chance(70) ? static_cast<int>(1 + rnd(8)) : static_cast<int>(rnd(chance(15) ? 80 : 20));
+			s += digits(nd);
+		}
+		if (!delta && chance(30)) {
+			s += chance(50) ? '+' : '-';
+			const int h = static_cast<int>(rnd(chance(10) ? 120 : 24));
+			s += two(h);
+			s += ':';
+			const int m = static_cast<int>(rnd(chance(10) ? 120 : 60));
+			s += two(m);
+		}
+	}
+	return s;
+}
+
+static void time_tests(std::uint64_t n) {
+	for (std::uint64_t i = 0; i < n; ++i) {
+		for (bool delta : { false, true }) {
+			auto s = gen_time(delta);
+			check_time(s, delta);
+			check_time(mutate(s), delta);
+			if (chance(20)) { check_time(mutate(mutate(s)), delta); }
+		}
+	}
+}
+
+// Every single-byte value at every position of each time and timedelta template, and the
+// fractions around the width limit with and without an offset.
+static void exhaustive_time() {
+	const std::vector<std::string> times = { "12:34", "12:34:56", "12:34:56+05:30", "12:34:56-00:30", "12:34:56.7", "12:34:56.789012", "12:34:56.789-05:30" };
+	const std::vector<std::string> deltas = { "+12:34", "-12:34", "+12:34:56", "-12:34:56", "+12:34:56.7", "-12:34:56.789012" };
+	for (bool delta : { false, true }) {
+		for (const std::string& base : delta ? deltas : times) {
+			check_time(base, delta);
+			for (std::size_t pos = 0; pos < base.size(); ++pos) {
+				for (int b = 0; b < 256; ++b) {
+					std::string s = base;
+					s[pos] = static_cast<char>(b);
+					check_time(s, delta);
+				}
+			}
+		}
+	}
+	for (std::size_t nd : {std::size_t(1), std::size_t(6), std::size_t(7), grammar_fraction_digits - 1, grammar_fraction_digits, grammar_fraction_digits + 1, grammar_fraction_digits + 2, std::size_t(100), std::size_t(1000)}) {
+		for (const char* digit : { "1", "0", "9" }) {
+			const std::string f = std::string(nd, *digit);
+			check_time("12:34:56." + f, false);
+			check_time("12:34:56." + f + "+05:30", false);
+			check_time("12:34:56." + f + "-05:30", false);
+			check_time("+12:34:56." + f, true);
+			check_time("-12:34:56." + f, true);
+		}
 	}
 }
 
@@ -911,6 +1131,8 @@ int main(int argc, char** argv) {
 	exhaustive_fields();
 	calendar();
 	fractions();
+	wide_terms();
+	exhaustive_time();
 	for (std::uint64_t i = 0; i < n; ++i) {
 		auto s = gen_date();
 		check_string(s);
@@ -922,6 +1144,7 @@ int main(int argc, char** argv) {
 	}
 	math_tests(n);
 	tz_tests(n);
+	time_tests(n);
 	format_tests(n);
 	tm_tests(n);
 	calendar_function_tests(n);
@@ -930,7 +1153,9 @@ int main(int argc, char** argv) {
 		static_cast<unsigned long long>(class_neg), static_cast<unsigned long long>(class_frac), static_cast<unsigned long long>(class_z));
 	std::printf("                    month %llu, loose offset %llu, fraction before 1970 %llu\n",
 		static_cast<unsigned long long>(class_month), static_cast<unsigned long long>(class_off), static_cast<unsigned long long>(class_pre));
-	if (class_neg == 0 || class_frac == 0 || class_z == 0 || class_month == 0 || class_off == 0 || class_pre == 0) { std::printf("a changed class was never exercised\n"); ++failures; }
+	std::printf("                    wide term %llu, wide fraction %llu\n",
+		static_cast<unsigned long long>(class_wide_term), static_cast<unsigned long long>(class_wide_frac));
+	if (class_neg == 0 || class_frac == 0 || class_z == 0 || class_month == 0 || class_off == 0 || class_pre == 0 || class_wide_term == 0 || class_wide_frac == 0) { std::printf("a changed class was never exercised\n"); ++failures; }
 	std::printf("%llu checks, %llu mismatches, input digest %016llx\n", static_cast<unsigned long long>(checks), static_cast<unsigned long long>(failures),
 		static_cast<unsigned long long>(digest));
 	// The default CTest run (20000 iterations, the default seed) generates a recorded set of inputs.

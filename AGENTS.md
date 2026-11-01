@@ -69,7 +69,7 @@ Expected output ends with `all datetime tests passed`, exit 0. The test target i
   is the frozen reference implementation (namespace `DatetimeOld`) and
   `datetime_diff_test` compares every parser and formatter against it. The input
   classes that differ (negative fields, fractions, loose `Z`, months, loose
-  offsets, pre-1970 timestamp fractions) are listed at the top of `test/diff_test.cc`, each with its oracle.
+  offsets, pre-1970 timestamp fractions, fields wider than the grammar) are listed at the top of `test/diff_test.cc`, each with its oracle.
   Date fields are read by `field()`, which emulates the `strtoul` grammar
   (`"+5"` and `" 5"` are fields). Keep the differential test green; a result
   that changes outside those classes needs an owner decision.
@@ -110,6 +110,11 @@ Expected output ends with `all datetime tests passed`, exit 0. The test target i
   go through `days_from_civil` / `civil_from_days`; do not add a second table-based
   day count. The fraction of a timestamp is added to the whole seconds (floor), before
   1970 too.
+- **Field widths are datetime's own.** A fraction has 1 to 62 digits (`MAX_FRACTION_DIGITS`) and
+  the number of a date-math term at most 63 characters (`MAX_TERM_CHARS`), in every
+  scanner, checked before a field reaches strict-stox. The frozen reference passes the
+  field to strict-stox, so its answer on a wider one follows strict-stox's width; the test
+  asserts only the library there (class 8). Bound a new numeric field the same way.
 - **Random test inputs must not depend on the compiler.** Operands of `+` and call
   arguments are unsequenced: draw into named locals, one statement per draw.
   `test/diff_test.cc` prints a digest of the inputs it generates and compares it

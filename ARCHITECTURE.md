@@ -110,7 +110,9 @@ from that file in these ways:
 
 - **strict-stox** (header-only, FetchContent). Fractions longer than 6 digits
   and the time/timedelta parsers use `strict_stod` / `strict_stoul`; the
-  datetime date/time fields are read directly. This is the library's only third-party dependency.
+  datetime date/time fields are read directly. The widths of the grammar (a fraction's 1 to
+  62 digits, a date-math number's 63 characters) are checked by datetime's own scanners
+  before a field reaches strict-stox, so its width limit does not show. This is the library's only third-party dependency.
 - **No hashes / phf.** The perfect-hash table is MsgPack-key dispatch in the
   glue half. The pure core does not hash anything, so `hashes` is *not* a
   dependency here (unlike some sibling libraries).

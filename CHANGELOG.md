@@ -6,6 +6,33 @@ releases, so entries are dated.
 
 ## 2026-11-01
 
+### Changed
+
+- `TimeParser` and `TimedeltaParser` bound a fraction to 1 to 62 digits themselves, as
+  `DatetimeParser`, `Iso8601Parser` and the loose scanner already did. They had passed the
+  fraction's width to `strict_stod`, so the limit was strict-stox's: strict-stox up to
+  `21b7941` read 63 bytes and rejected a longer field, and strict-stox from `c1c9bc1` (its
+  exact decimal path) reads any width, so a 63-digit fraction would have parsed after a pin
+  bump. The widths of the grammar are now constants of `datetime.cc` (`MAX_FRACTION_DIGITS`
+  = 62, `MAX_TERM_CHARS` = 63, the number of a date-math term), checked before a field
+  reaches strict-stox; no result changes against a release built with `21b7941`.
+- `test/diff_test.cc` covers `TimeParser`, `TimedeltaParser`, `isTime` and `isTimedelta`
+  against the frozen reference (random, mutated, every byte at every position of 13
+  templates, and the widths around the limit); they were checked only by `test/test.cc`.
+- Class 8 of `test/diff_test.cc`: a field wider than the grammar (a fraction over 62 digits
+  in a datetime, time or timedelta; a date-math number over 63 characters). The frozen
+  reference passes the field to strict-stox, so its verdict is strict-stox's width:
+  with `21b7941` it equals the library's, with `c1c9bc1` or later it accepts
+  `+0...010d` (64 characters, the value 10) and a 63-digit fraction. That is 19,985 mismatches in 13.9M checks
+  on the first attempt of the pin bump (the pin was
+  `c1c9bc1`: 19,974 date-math terms, 11 loose-format fractions). The test now asserts the
+  library against the oracle there (an exact error, from the widths above, the reference on the
+  terms before a wide one, and the reference's message text) and `reference == library` everywhere
+  else; it passes with both pins (14.1M checks, 0 mismatches; 22,400 wide terms and 322
+  wide fractions hit). A mutant that raises or lowers either width by one, and one that removes
+  the time/timedelta bound, each fail a named check; with `datetime.cc` reverted to
+  `672fde6` the run fails on `TimeParser wide fraction`.
+
 ### Added
 
 - `bench/compare.cc` (`datetime_compare`, built with `-DDATETIME_BUILD_BENCH=ON` beside

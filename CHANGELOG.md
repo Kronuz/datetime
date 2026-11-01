@@ -80,11 +80,16 @@ releases, so entries are dated.
   handling in its divisions, and a month in 1..12 skips `normalizeMonths`.
   `bench/bench.cc` has rows for the four functions (the frozen original is the
   column on the left, with the calendar path these functions had before; three
-  interleaved rounds under `quiet strict`): on the M4 Pro `toordinal` 3.1 -> 1.7 ns,
+  interleaved rounds under `quiet strict`): on the M4 Pro `toordinal` 3.1 -> 1.8 ns,
   `timegm(tm_t)` 4.7 -> 3.0 ns, `timestamp(tm_t)` 4.4 -> 2.9 ns; on the i9 5.7 ->
-  3.4 ns, 8.9 -> 5.1 ns and 11.2 -> 6.9 ns. Date math calls `timegm`, and its parse
-  row (`...||+1d/d`) is unchanged within the spread (54 ns before and after on the
-  M4 Pro, 98 ns on the i9).
+  3.4 ns, 9.0 -> 5.1 ns and 11.2 -> 6.9 ns. The other rows of `bench/bench.cc` are the
+  same before and after within about 4% on both machines (date math, `...||+1d/d`, 55
+  ns on the M4 Pro and 98 ns on the i9, calls `timegm`); `parse ...+hh:mm` is 1 ns
+  slower on the M4 Pro (29.5 -> 30.6 ns) on code this change does not touch, with the
+  frozen original in the same binary unchanged.
+- The seven-digit-and-longer fraction path of `parse_fsec` is a separate function that
+  is not inlined, so the microsecond path stays as small as it was where it is inlined
+  into the scanner (`parse .ffffffZ` was 7% slower on the i9 before the split).
 - `test/diff_test.cc` draws every random value in its own statement. Operands of
   `+` and call arguments are unsequenced, so `f(rnd(), rnd())` and
   `(chance(50) ? "+" : "-") + digits(...)` took their draws in an order the

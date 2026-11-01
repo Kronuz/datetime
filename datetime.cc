@@ -196,21 +196,11 @@ static inline bool field(const char* p, int n, int& v, bool& wrap) {
 	return true;
 }
 
-// Fraction digits to a normalized fsec. A fraction has 1 to 62 digits, whatever the size
-// of strict_stod's buffer. Up to 6 digits are integer microseconds
-// (round(strtod(".ddd") * 1e6) / 1e6 is exactly micro / 1e6); the others take the
-// strict_stod + normalize_fsec path.
-static inline bool parse_fsec(const char* digits, std::size_t nd, double& out) {
+// A fraction of 7 to 62 digits: strict_stod + normalize_fsec. Zero digits, or 63 or more,
+// is not a fraction, whatever the size of strict_stod's buffer. Out of line, so the
+// microsecond path below stays small where it is inlined.
+[[gnu::noinline]] static bool parse_fsec_long(const char* digits, std::size_t nd, double& out) {
 	if (nd < 1 || nd > 62) { return false; }
-	if (nd <= 6) {
-		unsigned micro = 0;
-		for (std::size_t i = 0; i < nd; ++i) {
-			micro = micro * 10 + static_cast<unsigned>(digits[i] - '0');
-		}
-		static constexpr unsigned pow10[] = { 1, 10, 100, 1000, 10000, 100000, 1000000 };
-		out = static_cast<double>(micro * pow10[6 - nd]) / DATETIME_MICROSECONDS;
-		return true;
-	}
 	std::string buf;
 	buf.reserve(nd + 1);
 	buf.push_back('.');
@@ -220,6 +210,21 @@ static inline bool parse_fsec(const char* digits, std::size_t nd, double& out) {
 	if (errno_save != 0) { return false; }
 	out = Datetime::normalize_fsec(fsec);
 	return true;
+}
+
+// Fraction digits to a normalized fsec. A fraction has 1 to 62 digits. Up to 6 digits are
+// integer microseconds (round(strtod(".ddd") * 1e6) / 1e6 is exactly micro / 1e6).
+static inline bool parse_fsec(const char* digits, std::size_t nd, double& out) {
+	if (nd >= 1 && nd <= 6) {
+		unsigned micro = 0;
+		for (std::size_t i = 0; i < nd; ++i) {
+			micro = micro * 10 + static_cast<unsigned>(digits[i] - '0');
+		}
+		static constexpr unsigned pow10[] = { 1, 10, 100, 1000, 10000, 100000, 1000000 };
+		out = static_cast<double>(micro * pow10[6 - nd]) / DATETIME_MICROSECONDS;
+		return true;
+	}
+	return parse_fsec_long(digits, nd, out);
 }
 
 

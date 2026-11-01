@@ -16,6 +16,10 @@ releases, so entries are dated.
   bump. The widths of the grammar are now constants of `datetime.cc` (`MAX_FRACTION_DIGITS`
   = 62, `MAX_TERM_CHARS` = 63, the number of a date-math term), checked before a field
   reaches strict-stox; no result changes against a release built with `21b7941`.
+- strict-stox moves from `21b7941` to `752cf9f` (its main). On the 2-byte and 3-byte
+  fields `datetime` hands it (every 1- and 2-byte string, 4,913 3-byte strings) and on
+  1 to 62 digit fractions (24,925 strings) the two versions return identical values and
+  errno; they differ only above 62 digits (63 to 2000 digits: rejected before, accepted now).
 - `test/diff_test.cc` covers `TimeParser`, `TimedeltaParser`, `isTime` and `isTimedelta`
   against the frozen reference (random, mutated, every byte at every position of 13
   templates, and the widths around the limit); they were checked only by `test/test.cc`.

@@ -11,7 +11,7 @@ datetime.h                   Datetime namespace API: tm_t / clk_t / Format, the 
 datetime.cc                  The pure-core implementation: ISO 8601 + date-math + time + timedelta parsing/formatting. Compiled.
 test/diff_test.cc            Differential test against the frozen reference in test/old/ (CTest `datetime_diff`).
 test/old/                    Frozen reference datetime.h/.cc, namespace DatetimeOld. Do not edit.
-test/datemath_test.cc        Years 1..9999, huge date-math terms, months and loose offsets against independent references (CTest `datetime_datemath`).
+test/datemath_test.cc        Years 1..9999, huge date-math terms, months, loose offsets, pre-1970 fractions, normalizeMonths and toordinal/timegm validation against independent references (CTest `datetime_datemath`).
 test/ref.h                   The references: days-from-civil, the month arithmetic model.
 bench/bench.cc               Benchmark against test/old/ (-DDATETIME_BUILD_BENCH=ON).
 test/test.cc                 Runnable smoke test: ISO parses, date math, timestamp round-trip, time/timedelta, throwing paths, predicates.
@@ -69,7 +69,7 @@ Expected output ends with `all datetime tests passed`, exit 0. The test target i
   is the frozen reference implementation (namespace `DatetimeOld`) and
   `datetime_diff_test` compares every parser and formatter against it. The input
   classes that differ (negative fields, fractions, loose `Z`, months, loose
-  offsets) are listed at the top of `test/diff_test.cc`, each with its oracle.
+  offsets, pre-1970 timestamp fractions) are listed at the top of `test/diff_test.cc`, each with its oracle.
   Date fields are read by `field()`, which emulates the `strtoul` grammar
   (`"+5"` and `" 5"` are fields). Keep the differential test green; a result
   that changes outside those classes needs an owner decision.
@@ -102,8 +102,19 @@ Expected output ends with `all datetime tests passed`, exit 0. The test target i
   supported years are 1..`INT_MAX`. `test/datemath_test.cc` checks it against a
   days-from-civil reference and is meant to be run under UBSan too.
 - **Loose `Z` and loose offsets are UTC** (`is_utc = true`), like the ISO path.
-- **`normalizeMonths` yields 1..12** for any month; `test/datemath_test.cc` checks
-  every start month and N in -240..240 against the month model in `test/ref.h`.
+- **`normalizeMonths` yields 1..12** for any month, in constant time, and throws
+  `Year is out of range` when the carried year leaves `int`;
+  `test/datemath_test.cc` checks every start month and N in -240..240 against the
+  month model in `test/ref.h`, and the extremes against 128-bit arithmetic.
+- **The calendar has one engine.** `toordinal`, `timegm`, `timestamp` and `to_tm_t`
+  go through `days_from_civil` / `civil_from_days`; do not add a second table-based
+  day count. The fraction of a timestamp is added to the whole seconds (floor), before
+  1970 too.
+- **Random test inputs must not depend on the compiler.** Operands of `+` and call
+  arguments are unsequenced: draw into named locals, one statement per draw.
+  `test/diff_test.cc` prints a digest of the inputs it generates and compares it
+  with the recorded one for the default run; change the constant only when the
+  generator changes on purpose.
 
 ## Standalone vs. Xapiand
 

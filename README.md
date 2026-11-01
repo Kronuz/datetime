@@ -34,6 +34,9 @@ formatting back out. For query languages and APIs that take dates as text.
 - Month arithmetic is exact for any count: `2020-12-15||+12M` is `2021-12-15`,
   and the day clamps to the length of the new month (`2020-01-31||+1M` is
   `2020-02-29`).
+- The fraction of a timestamp is the distance above its whole second, before 1970
+  as after: `timestamp` of 1969-12-31T23:59:58.9 is -1.1, and `to_tm_t(-2.9)` is
+  1969-12-31T23:59:57.1.
 - Date-math terms such as `+2147483647d` are computed in 64-bit arithmetic. The
   supported years are 1 to `INT_MAX`; a result beyond them throws
   `Year is out of range`. Year 1 with an offset that moves the instant before

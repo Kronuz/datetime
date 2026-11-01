@@ -51,7 +51,11 @@ Behavior notes:
   `is_utc`, like the ISO form; a loose-format offset (`...05+05:30`) is applied
   and also sets `is_utc`.
 - Month arithmetic (`+N M`, `-N M`) is exact for any N: `normalizeMonths` maps a
-  month to 1..12 and carries whole years; the day clamps to the new month's length.
+  month to 1..12 and carries whole years in constant time; the day clamps to the
+  new month's length. A carried year outside `int` throws
+  `DatetimeError("Year is out of range")` and leaves the arguments unchanged.
+- The fraction of a timestamp lies above its whole second: `timestamp` of
+  1969-12-31T23:59:58.9 is -1.1, and `to_tm_t(-2.9)` is 23:59:57.1.
 - Date-math terms are 64-bit; the supported years are 1 to `INT_MAX`. A result
   outside them, and year 1 with an offset that reaches before 0001-01-01, throw
   `DatetimeError("Year is out of range")`.

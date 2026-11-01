@@ -67,12 +67,18 @@ year 0. Other offsets run through `computeDateMath`.
 
 ### Numeric core
 
-`toordinal` computes a proleptic Gregorian day number; `timegm` /
-`timestamp(tm_t)` build a Unix timestamp from it (valid only for year > 0, which
-is the library's domain); `to_tm_t` goes the other way with an integer civil-from-days conversion (floor
-semantics, no libc time-zone state). Leap-year
-and days-in-month logic lives in `isleapYear` / `getDays_month` with two static
-`days` / `cumdays` tables.
+`days_from_civil` (an integer proleptic Gregorian day count from 1970-01-01, with an
+unsigned variant for years >= 1 that needs no sign handling in its divisions) and
+`civil_from_days` are the only calendar arithmetic. `toordinal` validates its
+arguments (year >= 1, then the day below 1, the month, the day against the month
+length) and adds the ordinal of 1970-01-01; `timegm` and `timestamp(tm_t)` normalize
+the month with `normalizeMonths`, require year >= 1, and sum days, hours, minutes
+and seconds in 64-bit integers. `timestamp` adds the fraction to those whole seconds,
+before 1970 as after, so instants rise with the clock. `to_tm_t(time_t)` and
+`to_tm_t(double)` go the other way with floor semantics (the fraction of a timestamp
+is its distance above the whole second) and no libc time-zone state. Leap-year and
+days-in-month logic lives in `isleapYear` / `getDays_month` with a static `days`
+table.
 
 ## Relation to Xapiand
 

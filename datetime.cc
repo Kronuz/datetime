@@ -1637,6 +1637,9 @@ Datetime::TimedeltaParser(std::string_view timedelta)
 			}
 			break;
 
+		case 0: // nothing to read
+			break;
+
 		default: //  [+-]00:00:00.000...
 			switch (timedelta[0]) {
 				case '-':

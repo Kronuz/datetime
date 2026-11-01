@@ -6,6 +6,13 @@ releases, so entries are dated.
 
 ## 2026-11-01
 
+### Fixed
+
+- `TimedeltaParser("")` read `timedelta[0]` of an empty view. It still throws `TimedeltaError`,
+  now without the out-of-bounds read (an assertion failure under libstdc++'s hardening,
+  which `test/diff_test.cc` found once it compared the time parsers). The frozen reference
+  has the same read, so the test runs only the library on an empty timedelta (class 9).
+
 ### Changed
 
 - `TimeParser` and `TimedeltaParser` bound a fraction to 1 to 62 digits themselves, as

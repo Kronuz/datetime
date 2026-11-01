@@ -7,7 +7,7 @@
 // partial writes left by a failing parse), exception message, and formatted
 // strings.
 //
-// The reference and the library differ on eight explicit input classes (the
+// The reference and the library differ on nine explicit input classes (the
 // reference carries bugs the library fixes, or rides a width limit of strict-stox
 // that the library does not). Outside them reference == library
 // is enforced completely (verdicts, every tm_t field, exception text, formats):
@@ -53,6 +53,9 @@
 //     there; the library must equal the oracle on both pins. Oracle: the widths above, as
 //     written in docs/API.md (the constants below are the test's own copy), the reference
 //     on the terms before a wide one, and the reference's exception text.
+//  9. An empty timedelta ("") : the reference reads timedelta[0] of an empty view (out of
+//     bounds, an assertion under libstdc++'s hardening); the library throws TimedeltaError
+//     ("Error format in timedelta: , ..."). Only the library is run on it.
 // The oracle for 1 and 2 is ref_iso() below, a reference verdict written from
 // the grammar; it is cross-checked against the reference implementation
 // everywhere the two agree, and against both library overloads everywhere. The
@@ -96,7 +99,7 @@ static bool chance(unsigned pct) { return rnd(100) < pct; }
 // different inputs fail instead of testing different things.
 static std::uint64_t digest = 0xcbf29ce484222325ULL;
 // The digest of the default run, `datetime_diff_test 20000`.
-static constexpr std::uint64_t expected_digest_20000 = 0x18108c912bb7bf46ULL;
+static constexpr std::uint64_t expected_digest_20000 = 0xacbb5fbcb3587e59ULL;
 static void feed_u(std::uint64_t v) { digest = (digest ^ v) * 0x100000001b3ULL; }
 static void feed_s(std::string_view s) {
 	for (unsigned char c : s) { feed_u(c); }
@@ -212,7 +215,7 @@ using Fmt = Datetime::Format;
 // Class 8: the widths of the grammar, as docs/API.md states them (the test's own copy).
 static constexpr std::size_t grammar_term_chars = 63;       // the number of a date-math term, sign excluded
 static constexpr std::size_t grammar_fraction_digits = 62;  // a fraction has 1 to 62 digits
-static std::uint64_t class_wide_term = 0, class_wide_frac = 0;
+static std::uint64_t class_wide_term = 0, class_wide_frac = 0, class_empty = 0;
 
 // Whether a fraction separator in `s` is followed by more digits than a fraction has.
 static bool wide_fraction(std::string_view s) {
@@ -833,6 +836,15 @@ static void check_time(const std::string& s, bool delta) {
 	feed_s(s);
 	feed_u(delta);
 	const std::string_view sv(s);
+	if (delta && s.empty()) {
+		// Class 9: the reference reads timedelta[0] of an empty view (out of bounds, an assertion
+		// under libstdc++'s hardening); the library throws. Only the library is run.
+		++checks;
+		auto o = run([&] { return show_clk(Datetime::TimedeltaParser(sv)); });
+		if (!o.threw || o.msg != "Error format in timedelta: , the format must be '[+-]00:00(:00(.0...))'") { fail("TimedeltaParser empty", s, "new=[" + (o.threw ? o.msg : o.payload) + "]"); }
+		++class_empty;
+		return;
+	}
 	const auto old_o = run([&] { return show_clk(delta ? DatetimeOld::TimedeltaParser(sv) : DatetimeOld::TimeParser(sv)); });
 	const auto new_o = run([&] { return show_clk(delta ? Datetime::TimedeltaParser(sv) : Datetime::TimeParser(sv)); });
 	if (wide_fraction(s)) {
@@ -895,6 +907,7 @@ static void exhaustive_time() {
 	const std::vector<std::string> times = { "12:34", "12:34:56", "12:34:56+05:30", "12:34:56-00:30", "12:34:56.7", "12:34:56.789012", "12:34:56.789-05:30" };
 	const std::vector<std::string> deltas = { "+12:34", "-12:34", "+12:34:56", "-12:34:56", "+12:34:56.7", "-12:34:56.789012" };
 	for (bool delta : { false, true }) {
+		check_time("", delta);
 		for (const std::string& base : delta ? deltas : times) {
 			check_time(base, delta);
 			for (std::size_t pos = 0; pos < base.size(); ++pos) {
@@ -1153,9 +1166,9 @@ int main(int argc, char** argv) {
 		static_cast<unsigned long long>(class_neg), static_cast<unsigned long long>(class_frac), static_cast<unsigned long long>(class_z));
 	std::printf("                    month %llu, loose offset %llu, fraction before 1970 %llu\n",
 		static_cast<unsigned long long>(class_month), static_cast<unsigned long long>(class_off), static_cast<unsigned long long>(class_pre));
-	std::printf("                    wide term %llu, wide fraction %llu\n",
-		static_cast<unsigned long long>(class_wide_term), static_cast<unsigned long long>(class_wide_frac));
-	if (class_neg == 0 || class_frac == 0 || class_z == 0 || class_month == 0 || class_off == 0 || class_pre == 0 || class_wide_term == 0 || class_wide_frac == 0) { std::printf("a changed class was never exercised\n"); ++failures; }
+	std::printf("                    wide term %llu, wide fraction %llu, empty timedelta %llu\n",
+		static_cast<unsigned long long>(class_wide_term), static_cast<unsigned long long>(class_wide_frac), static_cast<unsigned long long>(class_empty));
+	if (class_neg == 0 || class_frac == 0 || class_z == 0 || class_month == 0 || class_off == 0 || class_pre == 0 || class_wide_term == 0 || class_wide_frac == 0 || class_empty == 0) { std::printf("a changed class was never exercised\n"); ++failures; }
 	std::printf("%llu checks, %llu mismatches, input digest %016llx\n", static_cast<unsigned long long>(checks), static_cast<unsigned long long>(failures),
 		static_cast<unsigned long long>(digest));
 	// The default CTest run (20000 iterations, the default seed) generates a recorded set of inputs.

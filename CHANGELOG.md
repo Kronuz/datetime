@@ -4,6 +4,23 @@ All notable changes to `datetime`. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the library has no
 releases, so entries are dated.
 
+## 2026-11-01
+
+### Added
+
+- `bench/compare.cc` (`datetime_compare`, built with `-DDATETIME_BUILD_BENCH=ON` beside
+  `datetime_bench`) times the parsers, `timestamp`, `to_tm_t` and `iso8601` against
+  independent implementations: a hand-written ISO 8601 parser and formatter, days-from-civil
+  and civil-from-days, libc `strptime` + `timegm`, and abseil's `ParseTime`, `FromCivil` and
+  `FormatTime` when abseil is installed. Before this, the benchmark compared only the frozen
+  reference. The numbers, on an Apple M4 Pro and an Intel i9-9980HK, are in the README:
+  `datetime` takes 1.2 to 3.2x the hand parser's time and about a sixth of `ParseTime`'s.
+- `datetime_compare --check` is the CTest test `datetime_compare`: every comparator must
+  return the library's results on 4096 random inputs per row. A mutant that moves the
+  day of the year, and one that moves January and February to the previous year in
+  `civil_from_days`, make it fail.
+- CI builds the benchmarks and runs the check.
+
 ## 2026-10-31
 
 ### Fixed

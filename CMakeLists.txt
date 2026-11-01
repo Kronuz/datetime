@@ -57,13 +57,28 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(datetime_datemath_test PRIVATE datetime)
   add_test(NAME datetime_datemath COMMAND datetime_datemath_test 20000)
 
-  # Benchmark against the frozen reference (no external comparators needed):
+  # Benchmarks: the frozen reference (datetime_bench) and independent comparators
+  # (datetime_compare: a hand-written ISO parser and formatter, the civil-calendar
+  # algorithms, libc strptime + timegm, and abseil when installed). Only these targets
+  # see the comparators:
   #   cmake -B build -DDATETIME_BUILD_BENCH=ON -DCMAKE_BUILD_TYPE=Release
-  option(DATETIME_BUILD_BENCH "Build the old-vs-new benchmark" OFF)
+  option(DATETIME_BUILD_BENCH "Build the benchmarks (frozen reference and comparators)" OFF)
   if(DATETIME_BUILD_BENCH)
     add_executable(datetime_bench bench/bench.cc test/old/datetime_old.cc)
     target_include_directories(datetime_bench PRIVATE test)
     target_link_libraries(datetime_bench PRIVATE datetime)
+
+    add_executable(datetime_compare bench/compare.cc)
+    target_link_libraries(datetime_compare PRIVATE datetime)
+    find_package(absl QUIET)
+    if(absl_FOUND)
+      target_link_libraries(datetime_compare PRIVATE absl::time)
+      target_compile_definitions(datetime_compare PRIVATE DATETIME_BENCH_ABSL)
+    else()
+      message(STATUS "datetime_compare: absl not found, the absl rows are skipped")
+    endif()
+    # No timing: every comparator must produce the same results as the library.
+    add_test(NAME datetime_compare COMMAND datetime_compare --check)
   endif()
 
   # A runnable tour of the library (not a test): build & run ./build/datetime_demo

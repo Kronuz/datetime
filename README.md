@@ -120,7 +120,34 @@ of `test/diff_test.cc` and in [CHANGELOG.md](CHANGELOG.md).
 ```sh
 cmake -B build -DDATETIME_BUILD_BENCH=ON -DCMAKE_BUILD_TYPE=Release && cmake --build build
 ./build/datetime_bench
+./build/datetime_compare
 ```
+
+`datetime_compare` times the same entry points against independent implementations: a
+hand-written ISO 8601 parser and formatter, the days-from-civil and civil-from-days
+algorithms, libc `strptime` + `timegm`, and abseil's `ParseTime`, `FromCivil` and
+`FormatTime` when abseil is installed. It checks that every comparator returns the same
+results, and `ctest` runs that check. The hand-written parser reads one grammar and reports
+failure with a bool; `datetime` also reads the loose forms, offsets and date math, validates
+every field, and reports what was wrong. ns per call, one thread, 4096 random inputs, best of
+two runs of seven passes:
+
+| Operation | Apple M4 Pro | | Intel i9-9980HK | |
+| :-- | --: | :-- | --: | :-- |
+| parse `2020-01-02` | 10.4 | hand 5.9 | 26.3 | hand 15.1 |
+| parse `2020-01-02T03:04:05Z` | 16.0 | hand 7.8, absl 100.8 | 40.2 | hand 22.7, absl 264.1 |
+| parse `2020-01-02T03:04:05.123456Z` | 20.5 | hand 10.0, absl 133.1 | 48.6 | hand 28.2, absl 355.7 |
+| parse `2020-01-02T03:04:05+05:30` | 28.8 | hand 8.9 | 62.7 | hand 26.7 |
+| parse `2020/01/02 03:04:05` | 19.7 | hand 9.1, `strptime`+`timegm` 2192 | 56.3 | hand 24.4, `strptime`+`timegm` 7041 |
+| `timestamp(tm_t)` | 2.8 | days-from-civil 1.8, absl 27.8 | 7.4 | days-from-civil 4.8, absl 71.5 |
+| `to_tm_t(time_t)` | 8.9 | civil-from-days 6.1 | 24.1 | civil-from-days 14.3 |
+| `iso8601(tm_t)` | 22.3 | hand 9.0, absl 1128 | 48.0 | hand 26.3, absl 2008 |
+| `isDatetime` | 13.8 | hand 10.2 | 33.6 | hand 27.8 |
+
+Apple clang 17 with `-O3` on both machines, abseil 20260817. `datetime` takes 1.2 to 3.2x the
+hand-written parser's time and about a sixth of abseil's `ParseTime`. abseil's `FormatTime`
+writes no fraction, so its row compares time only. The spread of a repeated run is under 3%
+for most rows, up to 8% on the M4 Pro for two parse rows, and 30% for `iso8601` on the i9.
 
 ## 🤝 Contributing
 

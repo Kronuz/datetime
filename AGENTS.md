@@ -14,10 +14,11 @@ test/old/                    Frozen reference datetime.h/.cc, namespace Datetime
 test/datemath_test.cc        Years 1..9999, huge date-math terms, months, loose offsets, pre-1970 fractions, normalizeMonths and toordinal/timegm validation against independent references (CTest `datetime_datemath`).
 test/ref.h                   The references: days-from-civil, the month arithmetic model.
 bench/bench.cc               Benchmark against test/old/ (-DDATETIME_BUILD_BENCH=ON).
+bench/compare.cc             Benchmark against independent comparators: a hand-written ISO parser and formatter, days-from-civil, libc strptime + timegm, and abseil when found (datetime_compare, same option). `--check` is CTest `datetime_compare`: every comparator must agree.
 test/test.cc                 Runnable smoke test: ISO parses, date math, timestamp round-trip, time/timedelta, throwing paths, predicates.
 examples/demo.cc             A runnable tour of every input form (not a test).
 CHANGELOG.md                 Dated changes, behavior changes and benchmark history.
-CMakeLists.txt               STATIC library `datetime` (+ alias datetime::datetime); FetchContents strict-stox; CTest test `datetime`.
+CMakeLists.txt               STATIC library `datetime` (+ alias datetime::datetime); FetchContents strict-stox; CTest tests `datetime`, `datetime_diff`, `datetime_datemath` and, with the bench option, `datetime_compare`.
 LICENSE                      MIT, Copyright (c) 2015-2019 Dubalu LLC.
 README.md                    What it is, install, quick start.
 docs/API.md                  Usage, scope, and everything it parses and formats.

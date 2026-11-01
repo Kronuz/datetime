@@ -649,19 +649,19 @@ static void check_math(const Datetime::tm_t& base, const std::string& math, bool
 	if (overflow_prone(math)) { return; }
 	auto mk = [&](auto& t) { t.year = base.year; t.mon = base.mon; t.day = base.day; t.hour = base.hour; t.min = base.min; t.sec = base.sec; t.fsec = base.fsec; t.is_utc = base.is_utc; };
 	const std::string label = math + " unit=" + unit + " base=" + show(pack(base));
-	auto old_o = run([&] { DatetimeOld::tm_t t; mk(t); std::string r; try { if (direct_op) DatetimeOld::computeDateMath(t, math, unit); else DatetimeOld::processDateMath(math, t); } catch (const std::exception& e) { r = std::string("throw ") + e.what() + " "; } return r + show(pack(t)); });
 	auto new_o = run([&] { Datetime::tm_t t; mk(t); std::string r; try { if (direct_op) Datetime::computeDateMath(t, math, unit); else Datetime::processDateMath(math, t); } catch (const std::exception& e) { r = std::string("throw ") + e.what() + " "; } return r + show(pack(t)); });
 	const std::string month_throw = std::string("throw ") + month_msg + " ";
 	if (direct_op ? math.size() > grammar_term_chars + 1 && (math[0] == '+' || math[0] == '-') : wide_term_digits(math)) {
 		// Class 8: the number of a term is at most 63 characters. The reference's answer depends on
-		// strict-stox's width, so only the oracle is checked: a direct term fails as non-numeric
-		// and leaves the tm_t alone; a chain throws.
+		// strict-stox's width (and it would run a regex over the wide term), so only the oracle is
+		// checked: a direct term fails as non-numeric and leaves the tm_t alone; a chain throws.
 		++class_wide_term;
 		++checks;
 		const std::string want = "throw Invalid format in Datetime Math unit: '" + std::string(1, unit) + "'. '" + math.substr(1) + "' must be numeric " + show(pack(base));
 		if (direct_op ? new_o.payload != want : new_o.payload.rfind("throw ", 0) != 0) { fail("math wide term", label, "new=[" + new_o.payload + "]"); }
 		return;
 	}
+	auto old_o = run([&] { DatetimeOld::tm_t t; mk(t); std::string r; try { if (direct_op) DatetimeOld::computeDateMath(t, math, unit); else DatetimeOld::processDateMath(math, t); } catch (const std::exception& e) { r = std::string("throw ") + e.what() + " "; } return r + show(pack(t)); });
 	const bool base_month_ok = base.mon >= 1 && base.mon <= 12;
 	if (old_o.payload.rfind(month_throw, 0) == 0 && (base_month_ok || old_o.payload != new_o.payload)) {
 		// (A base month outside 1..12 can legitimately throw it in both, e.g. "/M".)

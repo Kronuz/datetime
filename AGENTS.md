@@ -38,6 +38,52 @@ cmake -B build && cmake --build build && ctest --test-dir build
 Expected output ends with `all datetime tests passed`, exit 0. The test target is
 `datetime_test`; the registered CTest name is `datetime`.
 
+## Verification and benchmarks
+
+The method shared by the Kronuz libraries is in
+[docs/PERFORMANCE.md](https://github.com/Kronuz/cpp-libraries/blob/main/docs/PERFORMANCE.md).
+
+- **Tests.** `ctest` runs `datetime`, `datetime_diff` and `datetime_datemath`, and
+  `datetime_compare` when the benchmarks are built.
+- **Differential.** `datetime_diff` (`datetime_diff_test 20000`) compares every parser and
+  formatter with the frozen reference in `test/old/` (namespace `DatetimeOld`, never edited) on
+  random, mutated and exhaustive input. The classes where results differ are listed at the top of
+  `test/diff_test.cc`, each with its oracle; the test prints a digest of its inputs and checks it
+  against the recorded one, so every compiler tests the same inputs.
+- **Oracles.** `datetime_datemath` checks years 1 to 9999 and huge date-math terms against
+  Howard Hinnant's days-from-civil and a month arithmetic model (`test/ref.h`) and the extremes
+  against 128-bit arithmetic. `datetime_compare --check` requires a hand-written ISO 8601 parser
+  and formatter, the civil-calendar algorithms, libc `strptime` + `timegm` and, when installed,
+  abseil to return the library's results.
+- **Sanitizers.** CI (`.github/workflows/ci.yml`, which calls the shared
+  [cmake.yml](https://github.com/Kronuz/cpp-libraries/blob/main/.github/workflows/cmake.yml))
+  builds with `-DDATETIME_BUILD_BENCH=ON` and runs every test under ASan+UBSan and under TSan,
+  clang on Linux. The ASan+UBSan job (UBSan is the check on the 64-bit date math):
+
+  ```sh
+  CC=clang CXX=clang++ cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DDATETIME_BUILD_BENCH=ON \
+    -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -D_GLIBCXX_ASSERTIONS" \
+    -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+  cmake --build build-asan && ASAN_OPTIONS=detect_leaks=1 ctest --test-dir build-asan --output-on-failure
+  ```
+
+- **Benchmarks.** `-DDATETIME_BUILD_BENCH=ON` builds `datetime_bench` (`bench/bench.cc`: each row
+  times the frozen reference, `old`, and the library, `new`, and stops on any disagreement) and
+  `datetime_compare` (`bench/compare.cc`, the comparators above; abseil through
+  `find_package(absl)`, its rows skipped when absent). The README's Performance section has the
+  numbers. To compare two commits, build `datetime_bench` at each and run both with
+  `tools/ab_compare.py` from a clone of [cpp-libraries](https://github.com/Kronuz/cpp-libraries)
+  beside this one; it runs A, B and A again (the A/A control) every round, and `--column 2` reads
+  the library's time:
+
+  ```sh
+  git worktree add ../datetime-base BASE_COMMIT
+  cmake -S ../datetime-base -B build-base -DCMAKE_BUILD_TYPE=Release -DDATETIME_BUILD_BENCH=ON && cmake --build build-base --target datetime_bench
+  cmake -B build-bench -DCMAKE_BUILD_TYPE=Release -DDATETIME_BUILD_BENCH=ON && cmake --build build-bench --target datetime_bench
+  python3 ../cpp-libraries/tools/ab_compare.py run --rounds 7 --format unit --column 2 \
+    build-base/datetime_bench build-bench/datetime_bench
+  ```
+
 ## Conventions
 
 - **C++20.** The target requests `cxx_std_20` to stay uniform with the sibling

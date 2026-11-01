@@ -97,7 +97,7 @@ releases, so entries are dated.
   handling in its divisions, and a month in 1..12 skips `normalizeMonths`.
   `bench/bench.cc` has rows for the four functions (the frozen original is the
   column on the left, with the calendar path these functions had before; three
-  interleaved rounds under `quiet strict`): on the M4 Pro `toordinal` 3.1 -> 1.8 ns,
+  interleaved rounds on an otherwise idle machine): on the M4 Pro `toordinal` 3.1 -> 1.8 ns,
   `timegm(tm_t)` 4.7 -> 3.0 ns, `timestamp(tm_t)` 4.4 -> 2.9 ns; on the i9 5.7 ->
   3.4 ns, 9.0 -> 5.1 ns and 11.2 -> 6.9 ns. The other rows of `bench/bench.cc` are the
   same before and after within 3% on both machines (date math, `...||+1d/d`, 54 ns on
@@ -121,8 +121,7 @@ releases, so entries are dated.
   x86-64 before the change, and is f96573b230c52919 with both after it (`c654278`).
 - `.gitignore` covers build directories (`build*/`, `cmake-build-*/`, `dbg/`, `ubsan/`,
   `asan/`, `tsan/`, `*.dSYM/`, `.scratch/`). `dbg/`, committed by `7acfefd`, is
-  untracked since `ed7426b`; it stays in history, and rewriting history is the owner's
-  decision.
+  untracked since `ed7426b`; it stays in history.
 - The validating `Iso8601Parser` overload checks the fraction by digit count
   (1 to 62) instead of parsing its value, which cost 19% on `isDatetime` for a
   `.ffffffZ` input (`2359df3`).

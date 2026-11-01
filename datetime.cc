@@ -50,12 +50,6 @@ static constexpr int days[2][12] = {
 };
 
 
-static constexpr int cumdays[2][12] = {
-	{ 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 },
-	{ 0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335 }
-};
-
-
 // ---------------------------------------------------------------------------
 // Integer civil-calendar core (no libc time-zone state, no throwing checks).
 // Proleptic Gregorian; days are counted from 1970-01-01.
@@ -75,6 +69,17 @@ static constexpr std::int64_t days_from_civil(std::int64_t y, int m, std::int64_
 	const std::int64_t doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
 	const std::int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
 	return era * 146097 + doe - 719468;
+}
+
+// The same for year >= 1, 1 <= m <= 12 and 1 <= d <= 31: unsigned arithmetic, so the
+// divisions by constants need no sign handling.
+static constexpr std::int64_t days_from_civil_pos(std::uint32_t y, unsigned m, unsigned d) {
+	y -= m <= 2;
+	const std::uint32_t era = y / 400;
+	const std::uint32_t yoe = y - era * 400;
+	const std::uint32_t doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
+	const std::uint32_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+	return static_cast<std::int64_t>(era) * 146097 + doe - 719468;
 }
 
 static constexpr void civil_from_days(std::int64_t z, std::int64_t& y, int& m, int& d) {
@@ -191,11 +196,13 @@ static inline bool field(const char* p, int n, int& v, bool& wrap) {
 	return true;
 }
 
-// Fraction digits to a normalized fsec. Up to 6 digits are integer microseconds
-// (round(strtod(".ddd") * 1e6) / 1e6 is exactly micro / 1e6); anything else
-// takes the strict_stod + normalize_fsec path.
+// Fraction digits to a normalized fsec. A fraction has 1 to 62 digits, whatever the size
+// of strict_stod's buffer. Up to 6 digits are integer microseconds
+// (round(strtod(".ddd") * 1e6) / 1e6 is exactly micro / 1e6); the others take the
+// strict_stod + normalize_fsec path.
 static inline bool parse_fsec(const char* digits, std::size_t nd, double& out) {
-	if (nd >= 1 && nd <= 6) {
+	if (nd < 1 || nd > 62) { return false; }
+	if (nd <= 6) {
 		unsigned micro = 0;
 		for (std::size_t i = 0; i < nd; ++i) {
 			micro = micro * 10 + static_cast<unsigned>(digits[i] - '0');
@@ -932,20 +939,30 @@ Datetime::getDays_month(int year, int month)
 
 
 /*
- * Normalize the month into 1..12, carrying whole years into `year`
+ * Normalize the month into 1..12, carrying whole years into `year`. A result year
+ * outside int throws "Year is out of range" and leaves both arguments alone.
  */
 void
 Datetime::normalizeMonths(int& year, int& mon)
 {
-	if (mon > 12) {
-		year += (mon - 1) / 12;
-		mon = (mon - 1) % 12 + 1;
-	} else {
-		while (mon < 1) {
-			mon += 12;
-			year--;
-		}
-	}
+	const std::int64_t k = floor_div(static_cast<std::int64_t>(mon) - 1, 12);
+	const std::int64_t y = year + k;
+	if (y < INT_MIN || y > INT_MAX) { throw DatetimeError("Year is out of range"); }
+	year = static_cast<int>(y);
+	mon = static_cast<int>(mon - 12 * k);
+}
+
+
+/*
+ * Days since 1970-01-01 of the first day of month `mon` of `year`, with the month carried into
+ * the year first (in place); throws below year 1.
+ */
+static inline std::int64_t
+first_of_month(int& year, int& mon)
+{
+	if (mon < 1 || mon > 12) { Datetime::normalizeMonths(year, mon); }
+	if (year < 1) { throw DatetimeError("Year is out of range"); }
+	return days_from_civil_pos(static_cast<std::uint32_t>(year), static_cast<unsigned>(mon), 1);
 }
 
 
@@ -960,11 +977,10 @@ std::time_t
 Datetime::toordinal(int year, int month, int day)
 {
 	if (year < 1) { throw DatetimeError("Year is out of range"); }
-	if (day < 1 || day > getDays_month(year, month)) { throw DatetimeError("Day is out of range for month"); }
-
-	auto leap = static_cast<int>(isleapYear(year));
-	std::time_t result = 365LL * (year - 1) + (year - 1) / 4 - (year - 1) / 100 + (year - 1) / 400 + cumdays[leap][month - 1] + day;
-	return result;
+	if (day < 1) { throw DatetimeError("Day is out of range for month"); }
+	if (month < 1 || month > 12) { throw DatetimeError("Month must be in 1..12"); }
+	if (day > 28 && day > _getDays_month(year, month)) { throw DatetimeError("Day is out of range for month"); }
+	return static_cast<std::time_t>(days_from_civil_pos(static_cast<std::uint32_t>(year), static_cast<unsigned>(month), static_cast<unsigned>(day)) + DATETIME_EPOCH_ORD);
 }
 
 
@@ -976,15 +992,8 @@ std::time_t
 Datetime::timegm(const std::tm& tm)
 {
 	int year = tm.tm_year + DATETIME_START_YEAR, mon = tm.tm_mon + 1;
-	normalizeMonths(year, mon);
-	auto result = toordinal(year, mon, 1) - DATETIME_EPOCH_ORD + tm.tm_mday - 1;
-	result *= 24;
-	result += tm.tm_hour;
-	result *= 60;
-	result += tm.tm_min;
-	result *= 60;
-	result += tm.tm_sec;
-	return result;
+	const std::int64_t days = first_of_month(year, mon) + tm.tm_mday - 1;
+	return static_cast<std::time_t>(days * 86400 + tm.tm_hour * 3600LL + tm.tm_min * 60LL + tm.tm_sec);
 }
 
 
@@ -995,15 +1004,8 @@ Datetime::timegm(const std::tm& tm)
 std::time_t
 Datetime::timegm(tm_t& tm)
 {
-	normalizeMonths(tm.year, tm.mon);
-	auto result = toordinal(tm.year, tm.mon, 1) - DATETIME_EPOCH_ORD + tm.day - 1;
-	result *= 24;
-	result += tm.hour;
-	result *= 60;
-	result += tm.min;
-	result *= 60;
-	result += tm.sec;
-	return result;
+	const std::int64_t days = first_of_month(tm.year, tm.mon) + tm.day - 1;
+	return static_cast<std::time_t>(days * 86400 + tm.hour * 3600LL + tm.min * 60LL + tm.sec);
 }
 
 
@@ -1021,38 +1023,31 @@ Datetime::to_tm_t(std::time_t timestamp)
 
 
 /*
- * Transforms timestamp to a struct tm_t.
+ * Transforms timestamp to a struct tm_t. The whole seconds are the floor of the
+ * timestamp and the fraction is what lies above it, before 1970 as after.
  */
 Datetime::tm_t
 Datetime::to_tm_t(double timestamp)
 {
-	auto _time = static_cast<std::time_t>(timestamp);
+	const double whole = std::floor(timestamp);
 	std::int64_t y;
 	int mon, day, hour, min, sec;
-	civil_from_secs(_time, y, mon, day, hour, min, sec);
-	return { static_cast<int>(y), mon, day, hour, min, sec, normalize_fsec(timestamp - _time) };
+	civil_from_secs(static_cast<std::time_t>(whole), y, mon, day, hour, min, sec);
+	return { static_cast<int>(y), mon, day, hour, min, sec, normalize_fsec(timestamp - whole) };
 }
 
 
 /*
  * Function to calculate Unix timestamp from Coordinated Universal Time (UTC).
  * Only for year greater than 0.
- * Returns Timestamp with milliseconds as the decimal part.
+ * Returns Timestamp with the microseconds as the decimal part.
  */
 double
 Datetime::timestamp(const tm_t& tm)
 {
 	int year = tm.year, mon = tm.mon;
-	normalizeMonths(year, mon);
-	auto result = static_cast<double>(toordinal(year, mon, 1) - DATETIME_EPOCH_ORD + tm.day - 1);
-	result *= 24;
-	result += tm.hour;
-	result *= 60;
-	result += tm.min;
-	result *= 60;
-	result += tm.sec;
-	result < 0 ? result -= tm.fsec : result += tm.fsec;
-	return result;
+	const std::int64_t days = first_of_month(year, mon) + tm.day - 1;
+	return static_cast<double>(days * 86400 + tm.hour * 3600LL + tm.min * 60LL + tm.sec) + tm.fsec;
 }
 
 

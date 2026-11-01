@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <tuple>
 
 #include "datetime.h"
 
@@ -97,6 +98,24 @@ static void test_timestamp_roundtrip() {
 
 	// iso8601(double) round-trips a timestamp through the formatter.
 	assert(Datetime::iso8601(1615734566.0, true, 'T').substr(0, 19) == "2021-03-14T15:09:26");
+
+	// Before 1970 the fraction lies above the whole second, as after: 23:59:58.9, 23:59:59 and
+	// 23:59:59.1 on the last day of 1969 are -1.1, -1 and -0.9.
+	assert(approx(Datetime::timestamp(Datetime::tm_t(1969, 12, 31, 23, 59, 58, 0.9)), -1.1));
+	assert(Datetime::timestamp(Datetime::tm_t(1969, 12, 31, 23, 59, 59, 0.0)) == -1.0);
+	assert(approx(Datetime::timestamp(Datetime::tm_t(1969, 12, 31, 23, 59, 59, 0.1)), -0.9));
+	assert(Datetime::iso8601(-1.5, true, 'T').substr(0, 21) == "1969-12-31T23:59:58.5");
+	assert(Datetime::iso8601(-0.5, true, 'T').substr(0, 21) == "1969-12-31T23:59:59.5");
+	auto before = Datetime::to_tm_t(-2.9);
+	assert(before.year == 1969 && before.mon == 12 && before.day == 31 && before.hour == 23 && before.min == 59 && before.sec == 57 && approx(before.fsec, 0.1));
+
+	// The ordinal counts days from 0001-01-01 and validates its fields.
+	assert(Datetime::toordinal(1, 1, 1) == 1 && Datetime::toordinal(1970, 1, 1) == 719163 && Datetime::toordinal(2000, 3, 1) == 730180);
+	for (auto bad : { std::make_tuple(0, 1, 1), std::make_tuple(2021, 2, 29), std::make_tuple(2021, 13, 1), std::make_tuple(2021, 4, 31) }) {
+		bool threw = false;
+		try { Datetime::toordinal(std::get<0>(bad), std::get<1>(bad), std::get<2>(bad)); } catch (const DatetimeError&) { threw = true; }
+		assert(threw);
+	}
 
 	std::printf("datetime timestamp round-trip OK: timestamp<->to_tm_t, iso8601 formatting\n");
 }
@@ -247,6 +266,24 @@ static void test_edge_behaviors() {
 		assert(Datetime::Iso8601Parser(std::string_view(s), tm) == Format::ERROR);
 		assert(Datetime::Iso8601Parser(std::string_view(s)) == Format::ERROR);
 		assert(!Datetime::isDatetime(s));
+	}
+	// A fraction has 1 to 62 digits in both overloads, in the ISO and the loose formats,
+	// whatever strict_stod's own limit is.
+	for (const char* prefix : { "2020-01-02T03:04:05.", "2020/01/02 03:04:05." }) {
+		for (std::size_t digits : { std::size_t{61}, std::size_t{62}, std::size_t{63}, std::size_t{64}, std::size_t{100} }) {
+			const std::string s = prefix + std::string(digits, '7');
+			const bool iso = prefix[4] == '-';
+			if (iso) {
+				const Format want = digits <= 62 ? Format::VALID : Format::ERROR;
+				Datetime::tm_t tm;
+				assert(Datetime::Iso8601Parser(s, tm) == want);
+				assert(Datetime::Iso8601Parser(s) == want);
+				assert(Datetime::isDatetime(s) == (digits <= 62));
+			}
+			bool threw = false;
+			try { Datetime::DatetimeParser(s); } catch (const DatetimeError&) { threw = true; }
+			assert(threw == (digits > 62));
+		}
 	}
 	// A bare trailing dot is the 20-character shape: not ISO, and not loose either.
 	{

@@ -7,7 +7,7 @@
 // partial writes left by a failing parse), exception message, and formatted
 // strings.
 //
-// The reference and the library differ on six explicit input classes (the
+// The reference and the library differ on seven explicit input classes (the
 // reference carries bugs the library fixes). Outside them reference == library
 // is enforced completely (verdicts, every tm_t field, exception text, formats):
 //  1. Negative hour/min/sec ("2020-01-02T-3:04:05"): the reference's filling
@@ -34,6 +34,12 @@
 //  6. A loose-format offset ("2020/01/02 03:04:05+05:30"): the library sets
 //     is_utc, as the ISO path does for an applied offset. Oracle: the
 //     reference's result with is_utc forced true.
+//  7. A timestamp before 1970 with a fraction (`timestamp(tm_t)`, `to_tm_t(double)`,
+//     `iso8601(double)`): the reference subtracted the fraction from a negative whole-second
+//     count (23:59:58.9 was -2.9) and truncated a negative timestamp toward zero, dropping
+//     its fraction. The library adds the fraction (-1.1) and floors. Oracle: the reference
+//     calendar (ref.h) for the whole seconds, and the reference's own whole seconds plus or
+//     minus the fraction for `timestamp`.
 // The oracle for 1 and 2 is ref_iso() below, a reference verdict written from
 // the grammar; it is cross-checked against the reference implementation
 // everywhere the two agree, and against both library overloads everywhere. The
@@ -77,7 +83,7 @@ static bool chance(unsigned pct) { return rnd(100) < pct; }
 // different inputs fail instead of testing different things.
 static std::uint64_t digest = 0xcbf29ce484222325ULL;
 // The digest of the default run, `datetime_diff_test 20000`.
-static constexpr std::uint64_t expected_digest_20000 = 0xf96573b230c52919ULL;
+static constexpr std::uint64_t expected_digest_20000 = 0x8fb7519b57f3ad14ULL;
 static void feed_u(std::uint64_t v) { digest = (digest ^ v) * 0x100000001b3ULL; }
 static void feed_s(std::string_view s) {
 	for (unsigned char c : s) { feed_u(c); }
@@ -256,7 +262,7 @@ static Fmt ref_iso(std::string_view s) {
 	return nd >= 1 && nd <= 62 ? Fmt::VALID : Fmt::ERROR;
 }
 
-static std::uint64_t class_neg = 0, class_frac = 0, class_z = 0, class_month = 0, class_off = 0;
+static std::uint64_t class_neg = 0, class_frac = 0, class_z = 0, class_month = 0, class_off = 0, class_pre = 0;
 static const char* const month_msg = "Month must be in 1..12";
 
 static void check_string(const std::string& s) {
@@ -760,6 +766,90 @@ static void format_tests(std::uint64_t n) {
 }
 
 
+static std::string hexfloat(double v) {
+	char b[64];
+	std::snprintf(b, sizeof(b), "%a", v);
+	return b;
+}
+
+static DatetimeOld::tm_t to_old(const Datetime::tm_t& b) {
+	DatetimeOld::tm_t t;
+	t.year = b.year; t.mon = b.mon; t.day = b.day; t.hour = b.hour; t.min = b.min; t.sec = b.sec; t.fsec = b.fsec; t.is_utc = b.is_utc;
+	return t;
+}
+
+// toordinal, timegm (both overloads, including the month normalized in place) and
+// timestamp against the original, for valid and invalid fields: the same value or the
+// same exception for every input, except
+//  - class 5, a month that is a multiple of 12 above 12: the original's normalizeMonths
+//    leaves month 0 and the call throws "Month must be in 1..12"; the oracle is the
+//    original on the month already normalized (month 12 of the year it belongs to).
+//  - class 7, a timestamp before 1970 with a fraction: the original subtracted the fraction
+//    (23:59:58.9 was -2.9); the library adds it (-1.1). Oracle: whole seconds from the
+//    original with no fraction, plus the fraction.
+static void calendar_function_tests(std::uint64_t n) {
+	auto old_month = [&](int year, int mon, int& oy, int& om) {
+		oy = year;
+		om = mon;
+		if (mon > 12 && mon % 12 == 0) {
+			oy = year + mon / 12 - 1;
+			om = 12;
+			++class_month;
+		}
+	};
+	for (std::uint64_t i = 0; i < n; ++i) {
+		const bool odd = chance(25);
+		const int year = odd ? static_cast<int>(rnd(14)) - 3 : static_cast<int>(1 + rnd(chance(50) ? 2400 : 12000));
+		const int month = odd && chance(50) ? static_cast<int>(rnd(60)) - 12 : static_cast<int>(1 + rnd(12));
+		const int day = odd && chance(50) ? static_cast<int>(rnd(70)) - 20 : static_cast<int>(1 + rnd(31));
+		const int hour = static_cast<int>(rnd(30)) - 3;
+		const int min = static_cast<int>(rnd(70)) - 5;
+		const int sec = static_cast<int>(rnd(70)) - 5;
+		const double fsec = chance(50) ? 0.0 : static_cast<double>(rnd(1000000)) / 1e6;
+		for (int v : { year, month, day, hour, min, sec }) { feed_u(static_cast<std::uint32_t>(v)); }
+		feed_u(std::bit_cast<std::uint64_t>(fsec));
+		const std::string label = std::to_string(year) + "-" + std::to_string(month) + "-" + std::to_string(day) + " " + std::to_string(hour) + ":" + std::to_string(min) + ":" + std::to_string(sec) + " + " + hexfloat(fsec);
+
+		compare("toordinal", label,
+			run([&] { return std::to_string(DatetimeOld::toordinal(year, month, day)); }), run([&] { return std::to_string(Datetime::toordinal(year, month, day)); }));
+
+		int oy, om;
+		old_month(year, month, oy, om);
+		{
+			std::tm a{};
+			a.tm_year = year - DATETIME_START_YEAR; a.tm_mon = month - 1; a.tm_mday = day; a.tm_hour = hour; a.tm_min = min; a.tm_sec = sec;
+			std::tm o = a;
+			o.tm_year = oy - DATETIME_START_YEAR; o.tm_mon = om - 1;
+			compare("timegm(std::tm)", label,
+				run([&] { return std::to_string(DatetimeOld::timegm(o)); }), run([&] { return std::to_string(Datetime::timegm(a)); }));
+		}
+		{
+			const Datetime::tm_t base(year, month, day, hour, min, sec, fsec);
+			auto after = [](auto& t, std::string r) { return r + " " + show(pack(t)); };
+			compare("timegm(tm_t)", label,
+				run([&] { auto t = to_old(base); t.year = oy; t.mon = om; std::string r; try { r = std::to_string(DatetimeOld::timegm(t)); } catch (const std::exception& e) { r = std::string("throw ") + e.what(); } return after(t, r); }),
+				run([&] { auto t = base; std::string r; try { r = std::to_string(Datetime::timegm(t)); } catch (const std::exception& e) { r = std::string("throw ") + e.what(); } return after(t, r); }));
+
+			auto old_ts = [&](double f) { auto t = to_old(base); t.year = oy; t.mon = om; t.fsec = f; return run([&] { return hexfloat(DatetimeOld::timestamp(t)); }); };
+			auto new_ts = [&](double f) { auto t = base; t.fsec = f; return run([&] { return hexfloat(Datetime::timestamp(t)); }); };
+			const auto o = old_ts(fsec), w = new_ts(fsec);
+			if (!o.threw && !w.threw && o.payload != w.payload) {
+				// Class 7: the whole seconds are negative and there is a fraction.
+				const auto whole = old_ts(0.0);
+				++class_pre;
+				++checks;
+				const double base_secs = std::strtod(whole.payload.c_str(), nullptr);
+				if (!(base_secs < 0 && fsec != 0.0 && o.payload == hexfloat(base_secs - fsec) && w.payload == hexfloat(base_secs + fsec))) {
+					fail("timestamp class 7", label, "old=" + o.payload + " new=" + w.payload + " whole=" + whole.payload);
+				}
+			} else {
+				compare("timestamp", label, o, w);
+			}
+		}
+	}
+}
+
+
 static void tm_tests(std::uint64_t n) {
 	auto cmp_t = [&](std::int64_t t) {
 		feed_u(static_cast<std::uint64_t>(t));
@@ -771,6 +861,30 @@ static void tm_tests(std::uint64_t n) {
 		feed_u(std::bit_cast<std::uint64_t>(t));
 		char b[64];
 		std::snprintf(b, sizeof(b), "%.17g", t);
+		if (t < 0 && t != std::floor(t)) {
+			// Class 7, a fraction before 1970: the original took the whole seconds toward zero
+			// and dropped the fraction (it was negative); the library takes them toward minus
+			// infinity and keeps the distance above them. Oracle: the reference calendar for
+			// the whole seconds (days-from-civil in ref.h), the library's own fraction rounding.
+			++class_pre;
+			const auto tm_at = [](std::int64_t secs, double fsec) {
+				i128 y;
+				int m, d;
+				const i128 z = floordiv(secs, 86400);
+				ref_civil(z, y, m, d);
+				const int sod = static_cast<int>(secs - z * 86400);
+				return Datetime::tm_t(static_cast<int>(y), m, d, sod / 3600, sod % 3600 / 60, sod % 60, fsec);
+			};
+			const double whole = std::floor(t);
+			const auto want = tm_at(static_cast<std::int64_t>(whole), Datetime::normalize_fsec(t - whole));
+			const auto old_want = tm_at(static_cast<std::int64_t>(t), 0.0);
+			compare("to_tm_t(double) before 1970", b, run([&] { return show(pack(old_want)); }), run([&] { return show(pack(DatetimeOld::to_tm_t(t))); }));
+			compare("to_tm_t(double) before 1970, new", b, run([&] { return show(pack(want)); }), run([&] { return show(pack(Datetime::to_tm_t(t))); }));
+			compare("iso8601(double) before 1970", b, run([&] { return Datetime::iso8601(want); }), run([&] { return Datetime::iso8601(t); }));
+			++checks;
+			if (show(pack(want)) == show(pack(old_want))) { fail("class 7 must change the result", b, ""); }
+			return;
+		}
 		compare("to_tm_t(double)", b,
 			run([&] { return show(pack(DatetimeOld::to_tm_t(t))); }), run([&] { return show(pack(Datetime::to_tm_t(t))); }));
 		compare("iso8601(double)", b,
@@ -810,11 +924,13 @@ int main(int argc, char** argv) {
 	tz_tests(n);
 	format_tests(n);
 	tm_tests(n);
+	calendar_function_tests(n);
 
 	std::printf("changed classes hit: negative field %llu, fraction %llu, loose Z %llu\n",
 		static_cast<unsigned long long>(class_neg), static_cast<unsigned long long>(class_frac), static_cast<unsigned long long>(class_z));
-	std::printf("                    month %llu, loose offset %llu\n", static_cast<unsigned long long>(class_month), static_cast<unsigned long long>(class_off));
-	if (class_neg == 0 || class_frac == 0 || class_z == 0 || class_month == 0 || class_off == 0) { std::printf("a changed class was never exercised\n"); ++failures; }
+	std::printf("                    month %llu, loose offset %llu, fraction before 1970 %llu\n",
+		static_cast<unsigned long long>(class_month), static_cast<unsigned long long>(class_off), static_cast<unsigned long long>(class_pre));
+	if (class_neg == 0 || class_frac == 0 || class_z == 0 || class_month == 0 || class_off == 0 || class_pre == 0) { std::printf("a changed class was never exercised\n"); ++failures; }
 	std::printf("%llu checks, %llu mismatches, input digest %016llx\n", static_cast<unsigned long long>(checks), static_cast<unsigned long long>(failures),
 		static_cast<unsigned long long>(digest));
 	// The default CTest run (20000 iterations, the default seed) generates a recorded set of inputs.

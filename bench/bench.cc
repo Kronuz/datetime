@@ -116,4 +116,33 @@ int main() {
 	double a = run_t([](std::time_t t) { return DatetimeOld::to_tm_t(t); });
 	double b = run_t([](std::time_t t) { return Datetime::to_tm_t(t); });
 	std::printf("%-34s old %8.1f ns  new %7.1f ns  %6.1fx\n", "to_tm_t(time_t)", a, b, a / b);
+
+	// The calendar functions on valid dates of 1971..2099 (the same values from both).
+	auto calendar_row = [&](const char* name, auto&& fo, auto&& fn) {
+		for (int i = 0; i < 4096; ++i) { if (fo(i) != fn(i)) { std::printf("DIFFERENT %s\n", name); std::exit(1); } }
+		auto run = [&](auto&& f) {
+			double best = 1e30;
+			for (int pass = 0; pass < 7; ++pass) {
+				auto t0 = std::chrono::steady_clock::now();
+				std::size_t acc = 0;
+				for (int i = 0; i < 4096; ++i) { acc += f(i); }
+				auto t1 = std::chrono::steady_clock::now();
+				sink = acc;
+				best = std::min(best, std::chrono::duration<double, std::nano>(t1 - t0).count() / 4096);
+			}
+			return best;
+		};
+		double x = run(fo), y = run(fn);
+		std::printf("%-34s old %8.1f ns  new %7.1f ns  %6.1fx\n", name, x, y, x / y);
+	};
+	calendar_row("toordinal", [&](int i) { return static_cast<std::size_t>(DatetimeOld::toordinal(olds[i].year, olds[i].mon, olds[i].day)); },
+		[&](int i) { return static_cast<std::size_t>(Datetime::toordinal(tms[i].year, tms[i].mon, tms[i].day)); });
+	calendar_row("timegm(tm_t)", [&](int i) { auto t = olds[i]; return static_cast<std::size_t>(DatetimeOld::timegm(t)); },
+		[&](int i) { auto t = tms[i]; return static_cast<std::size_t>(Datetime::timegm(t)); });
+	calendar_row("timestamp(tm_t)", [&](int i) { return static_cast<std::size_t>(DatetimeOld::timestamp(olds[i]) * 1e6); },
+		[&](int i) { return static_cast<std::size_t>(Datetime::timestamp(tms[i]) * 1e6); });
+	std::vector<double> stamps;
+	for (int i = 0; i < 4096; ++i) { stamps.push_back(static_cast<double>(r(4000000000u)) + r(1000000) / 1e6); }
+	calendar_row("to_tm_t(double)", [&](int i) { return static_cast<std::size_t>(DatetimeOld::to_tm_t(stamps[i]).sec); },
+		[&](int i) { return static_cast<std::size_t>(Datetime::to_tm_t(stamps[i]).sec); });
 }

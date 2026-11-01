@@ -91,20 +91,20 @@ columns hold `datetime`'s ns and the `comparators` columns the comparators' ns; 
 
 | Operation | Apple M4 Pro | comparators | Intel Core i9-9980HK | comparators |
 | :-- | --: | :-- | --: | :-- |
-| parse `2020-01-02` | 10.4 | hand 5.9 | 26.3 | hand 15.1 |
-| parse `2020-01-02T03:04:05Z` | 16.0 | hand 7.8, absl 100.8 | 40.2 | hand 22.7, absl 264.1 |
-| parse `2020-01-02T03:04:05.123456Z` | 20.5 | hand 10.0, absl 133.1 | 48.6 | hand 28.2, absl 355.7 |
-| parse `2020-01-02T03:04:05+05:30` | 28.8 | hand 8.9 | 62.7 | hand 26.7 |
-| parse `2020/01/02 03:04:05` | 19.7 | hand 9.1, `strptime`+`timegm` 2192 | 56.3 | hand 24.4, `strptime`+`timegm` 7041 |
-| `timestamp(tm_t)` | 2.8 | days-from-civil 1.8, absl 27.8 | 7.4 | days-from-civil 4.8, absl 71.5 |
-| `to_tm_t(time_t)` | 8.9 | civil-from-days 6.1 | 24.1 | civil-from-days 14.3 |
-| `iso8601(tm_t)` | 22.3 | hand 9.0, absl 1128 | 48.0 | hand 26.3, absl 2008 |
-| `isDatetime` | 13.8 | hand 10.2 | 33.6 | hand 27.8 |
+| parse `2020-01-02` | 11.2 | hand 6.1 | 25.8 | hand 14.3 |
+| parse `2020-01-02T03:04:05Z` | 16.6 | hand 7.9, absl 98.6 | 39.5 | hand 19.9, absl 257.9 |
+| parse `2020-01-02T03:04:05.123456Z` | 20.3 | hand 10.1, absl 133.7 | 48.9 | hand 26.9, absl 346.2 |
+| parse `2020-01-02T03:04:05+05:30` | 29.5 | hand 9.0 | 61.7 | hand 23.2 |
+| parse `2020/01/02 03:04:05` | 20.2 | `strptime`+`timegm` 2178, hand 9.4 | 52.0 | `strptime`+`timegm` 6199, hand 19.1 |
+| `timestamp(tm_t)` | 2.8 | days-from-civil 1.7, absl 26.6 | 6.4 | days-from-civil 4.1, absl 58.6 |
+| `to_tm_t(time_t)` | 8.9 | civil-from-days 6.0 | 20.6 | civil-from-days 12.4 |
+| `iso8601(tm_t)` | 22.5 | hand 8.7, absl 1102 | 42.5 | hand 22.9, absl 1898 |
+| `isDatetime` | 13.6 | hand 9.9 | 27.3 | hand 22.9 |
 
-`datetime` takes 1.2x to 3.2x the hand-written parser's time, for the loose forms, offsets, date
-math, field validation and error reports the hand parser lacks, and about a sixth of abseil's
-`ParseTime`. Repeated runs spread under 3% for most rows, up to 8% for two parse rows on the M4
-Pro and 30% for `iso8601` on the i9.
+`datetime` takes 1.2x to 3.3x the hand-written parser's time, for the loose forms, offsets, date
+math, field validation and error reports the hand parser lacks, and about a seventh to a sixth of
+abseil's `ParseTime`. Repeated runs spread under 3% on the M4 Pro and, on the i9, under 3% for all
+rows but the loose-form parse and `iso8601`, which spread up to 21%.
 
 ```sh
 cmake -B build -DDATETIME_BUILD_BENCH=ON -DCMAKE_BUILD_TYPE=Release && cmake --build build

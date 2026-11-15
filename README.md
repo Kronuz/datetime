@@ -113,6 +113,8 @@ cmake -B build -DDATETIME_BUILD_BENCH=ON -DCMAKE_BUILD_TYPE=Release && cmake --b
 
 ## 📚 Documentation
 
+- [The Bag of Holding](https://kronuz.github.io/blog/bag-of-holding/):
+  the Familiars post that covers `datetime` among the small helpers.
 - [docs/API.md](docs/API.md): every parser and formatter, the behavior at the edges, and the
   scope.
 - [ARCHITECTURE.md](ARCHITECTURE.md): the grammar and how date math is applied.

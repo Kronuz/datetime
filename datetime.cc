@@ -1494,7 +1494,7 @@ Datetime::time_to_clk_t(double t)
 		return clk;
 	}
 
-	throw TimeError("Bad serialised time value");
+	throw TimeError("Bad serialized time value");
 }
 
 
@@ -1713,7 +1713,7 @@ Datetime::timedelta_to_clk_t(double t)
 		return clk;
 	}
 
-	throw TimedeltaError("Bad serialised timedelta value");
+	throw TimedeltaError("Bad serialized timedelta value");
 }
 
 

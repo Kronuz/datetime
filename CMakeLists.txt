@@ -27,7 +27,12 @@ FetchContent_MakeAvailable(strict_stox)
 # the tm_t / clk_t / Format types and the DatetimeError exception hierarchy in
 # datetime.h. The header keeps its original Xapiand name so a consumer that
 # already `#include "datetime.h"` just needs this repo on its include path.
-add_library(datetime STATIC datetime.cc)
+add_library(datetime STATIC
+  datetime.cc
+  datetime_math.cc
+  datetime_calendar.cc
+  datetime_format.cc
+  datetime_time.cc)
 target_include_directories(datetime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_features(datetime PUBLIC cxx_std_20)
 target_link_libraries(datetime PUBLIC strict_stox::strict_stox)

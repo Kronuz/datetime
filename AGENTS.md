@@ -8,7 +8,7 @@ how to build and test, the invariants you must not break, and the traps.
 
 ```
 datetime.h                   Datetime namespace API: tm_t / clk_t / Format, the parsers/formatters, DatetimeError hierarchy. Header.
-datetime.cc                  The pure-core implementation: ISO 8601 + date-math + time + timedelta parsing/formatting. Compiled.
+datetime.cc                  Datetime parsing (ISO 8601 and loose scanners, parsers, predicates). The other pieces, datetime_{math,calendar,format,time}.cc and datetime_detail.h, are listed in docs/source-layout.md. Compiled.
 test/diff_test.cc            Differential test against the frozen reference in test/old/ (CTest `datetime_diff`).
 test/old/                    Frozen reference datetime.h/.cc, namespace DatetimeOld. Do not edit.
 test/datemath_test.cc        Years 1..9999, huge date-math terms, months, loose offsets, pre-1970 fractions, normalizeMonths and toordinal/timegm validation against independent references (CTest `datetime_datemath`).
@@ -25,7 +25,7 @@ docs/API.md                  Usage, scope, and everything it parses and formats.
 ARCHITECTURE.md              Parse paths, numeric core, how the library differs from Xapiand.
 ```
 
-This is a compiled library (one `.cc`), not header-only. The CMake target is a
+This is a compiled library (`datetime.cc` and four sibling pieces), not header-only. The CMake target is a
 `STATIC` library that links `strict_stox::strict_stox` PUBLIC and requests
 `cxx_std_20`.
 

@@ -39,14 +39,14 @@
 // Proleptic Gregorian; days are counted from 1970-01-01.
 // ---------------------------------------------------------------------------
 
-static constexpr std::int64_t floor_div(std::int64_t a, std::int64_t b) {
+inline constexpr std::int64_t floor_div(std::int64_t a, std::int64_t b) {
 	auto q = a / b;
 	return (a % b != 0 && (a < 0) != (b < 0)) ? q - 1 : q;
 }
 
 // Days since 1970-01-01 of year-month-day; `d` is used linearly, so an
 // out-of-month day rolls over into the following months.
-static constexpr std::int64_t days_from_civil(std::int64_t y, int m, std::int64_t d) {
+inline constexpr std::int64_t days_from_civil(std::int64_t y, int m, std::int64_t d) {
 	y -= m <= 2;
 	const std::int64_t era = floor_div(y, 400);
 	const std::int64_t yoe = y - era * 400;
@@ -57,7 +57,7 @@ static constexpr std::int64_t days_from_civil(std::int64_t y, int m, std::int64_
 
 // The same for year >= 1, 1 <= m <= 12 and 1 <= d <= 31: unsigned arithmetic, so the
 // divisions by constants need no sign handling.
-static constexpr std::int64_t days_from_civil_pos(std::uint32_t y, unsigned m, unsigned d) {
+inline constexpr std::int64_t days_from_civil_pos(std::uint32_t y, unsigned m, unsigned d) {
 	y -= m <= 2;
 	const std::uint32_t era = y / 400;
 	const std::uint32_t yoe = y - era * 400;
@@ -66,7 +66,7 @@ static constexpr std::int64_t days_from_civil_pos(std::uint32_t y, unsigned m, u
 	return static_cast<std::int64_t>(era) * 146097 + doe - 719468;
 }
 
-static constexpr void civil_from_days(std::int64_t z, std::int64_t& y, int& m, int& d) {
+inline constexpr void civil_from_days(std::int64_t z, std::int64_t& y, int& m, int& d) {
 	z += 719468;
 	const std::int64_t era = floor_div(z, 146097);
 	const std::int64_t doe = z - era * 146097;
@@ -79,7 +79,7 @@ static constexpr void civil_from_days(std::int64_t z, std::int64_t& y, int& m, i
 }
 
 // Seconds since the epoch to broken-down fields (floor semantics, like gmtime_r).
-static inline void civil_from_secs(std::int64_t t, std::int64_t& y, int& mon, int& day, int& hour, int& min, int& sec, int* wday = nullptr) {
+inline void civil_from_secs(std::int64_t t, std::int64_t& y, int& mon, int& day, int& hour, int& min, int& sec, int* wday = nullptr) {
 	const std::int64_t z = floor_div(t, 86400);
 	const auto rem = static_cast<int>(t - z * 86400);
 	civil_from_days(z, y, mon, day);
@@ -91,20 +91,20 @@ static inline void civil_from_secs(std::int64_t t, std::int64_t& y, int& mon, in
 	}
 }
 
-static inline void set_from_secs(Datetime::tm_t& tm, std::int64_t t) {
+inline void set_from_secs(Datetime::tm_t& tm, std::int64_t t) {
 	std::int64_t y;
 	civil_from_secs(t, y, tm.mon, tm.day, tm.hour, tm.min, tm.sec);
 	if (y > INT_MAX) { throw DatetimeError("Year is out of range"); }
 	tm.year = static_cast<int>(y);
 }
 
-static inline std::int64_t secs_of(const Datetime::tm_t& tm) {
+inline std::int64_t secs_of(const Datetime::tm_t& tm) {
 	return days_from_civil(tm.year, tm.mon, tm.day) * 86400 + tm.hour * 3600LL + tm.min * 60LL + tm.sec;
 }
 
 // Seconds at 0001-01-01T00:00:00; a date-math step that starts from a year
 // below it throws "Year is out of range".
-static constexpr std::int64_t MIN_YEAR1_SECS = -62135596800LL;
+inline constexpr std::int64_t MIN_YEAR1_SECS = -62135596800LL;
 
 
 // Offsets: "-H h" then "-M m" of date math, as one integer sum (the second
@@ -112,7 +112,7 @@ static constexpr std::int64_t MIN_YEAR1_SECS = -62135596800LL;
 // Precondition: tm.year >= 1 and 1 <= tm.mon <= 12.
 // `day_in_month` promises 1 <= tm.day <= days in tm.mon; then an offset that
 // keeps the time of day within the same date touches only hour/min/sec.
-static inline void apply_tz(Datetime::tm_t& tm, char op, int h, int m, bool day_in_month) {
+inline void apply_tz(Datetime::tm_t& tm, char op, int h, int m, bool day_in_month) {
 	const int sign = op == '+' ? -1 : 1;
 	if (day_in_month) {
 		const auto sod = tm.hour * 3600LL + tm.min * 60LL + tm.sec + sign * (h * 3600LL + m * 60LL);
@@ -137,13 +137,13 @@ static inline void apply_tz(Datetime::tm_t& tm, char op, int h, int m, bool day_
 // The widths of the grammar. They are datetime's own: every scanner checks them before a
 // field reaches strict-stox, so the verdicts do not depend on how wide a field strict-stox
 // reads.
-static constexpr std::size_t MAX_FRACTION_DIGITS = 62;  // a fraction has 1 to 62 digits
-static constexpr std::size_t MAX_TERM_CHARS = 63;       // the number of a date-math term, sign excluded
+inline constexpr std::size_t MAX_FRACTION_DIGITS = 62;  // a fraction has 1 to 62 digits
+inline constexpr std::size_t MAX_TERM_CHARS = 63;       // the number of a date-math term, sign excluded
 
 // A fraction of 7 to 62 digits: strict_stod + normalize_fsec. Zero digits, or 63 or more,
 // is not a fraction. Out of line, so the microsecond path below stays small where it is
 // inlined.
-[[gnu::noinline]] static bool parse_fsec_long(const char* digits, std::size_t nd, double& out) {
+[[gnu::noinline]] inline bool parse_fsec_long(const char* digits, std::size_t nd, double& out) {
 	if (nd < 1 || nd > MAX_FRACTION_DIGITS) { return false; }
 	std::string buf;
 	buf.reserve(nd + 1);
@@ -158,7 +158,7 @@ static constexpr std::size_t MAX_TERM_CHARS = 63;       // the number of a date-
 
 // Fraction digits to a normalized fsec. A fraction has 1 to 62 digits. Up to 6 digits are
 // integer microseconds (round(strtod(".ddd") * 1e6) / 1e6 is exactly micro / 1e6).
-static inline bool parse_fsec(const char* digits, std::size_t nd, double& out) {
+inline bool parse_fsec(const char* digits, std::size_t nd, double& out) {
 	if (nd >= 1 && nd <= 6) {
 		unsigned micro = 0;
 		for (std::size_t i = 0; i < nd; ++i) {
@@ -173,7 +173,7 @@ static inline bool parse_fsec(const char* digits, std::size_t nd, double& out) {
 
 // The fraction of a time or timedelta, the dot and then digits only: 1 to MAX_FRACTION_DIGITS
 // digits, like every other fraction.
-static bool parse_dotted_fsec(std::string_view dotted, double& out) {
+inline bool parse_dotted_fsec(std::string_view dotted, double& out) {
 	if (dotted.size() < 2 || dotted.size() - 1 > MAX_FRACTION_DIGITS) { return false; }
 	int errno_save;
 	auto fsec = strict_stod(&errno_save, dotted);

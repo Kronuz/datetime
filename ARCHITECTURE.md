@@ -4,7 +4,7 @@ The internal design of the `datetime` library.
 
 ## What this library is
 
-A single compiled translation unit (`datetime.cc`) behind one header
+A single static library (`datetime.cc` and its pieces, see `docs/source-layout.md`) behind one header
 (`datetime.h`), all in the `Datetime` namespace. It turns date/time *strings and
 numbers* into structured values and back. Three input vocabularies:
 

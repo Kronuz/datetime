@@ -15,9 +15,7 @@ public header; users include it and nothing else.
 | `datetime_time.cc` | Time and timedelta: `TimeParser`, `TimedeltaParser`, the `clk_t` and double conversions, the `*_to_string` formatters and the predicates. |
 | `datetime_detail.h` | Internal, not for users: the civil-calendar core (`days_from_civil`, `civil_from_secs`, `apply_tz`, ...), the grammar's widths and the fraction parsers that several pieces share. |
 
-The helpers in `datetime_detail.h` are the `static` functions they were in the single file; each
-piece that includes the header gets its own inlinable copy. They are not in a `detail` namespace
-because that would rename every call site.
+The helpers in `datetime_detail.h` are `inline` functions and constants, so every piece inlines them and the program holds one copy of each. They stay at global scope, not in a `detail` namespace, because that would rename every call site.
 
 ## Tests
 

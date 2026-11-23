@@ -32,6 +32,18 @@
 #include "datetime_detail.h"                      // for the shared helpers
 
 
+// The fraction of a time or timedelta, the dot and then digits only: 1 to MAX_FRACTION_DIGITS
+// digits, like every other fraction.
+static bool parse_dotted_fsec(std::string_view dotted, double& out) {
+	if (dotted.size() < 2 || dotted.size() - 1 > MAX_FRACTION_DIGITS) { return false; }
+	int errno_save;
+	auto fsec = strict_stod(&errno_save, dotted);
+	if (errno_save != 0) { return false; }
+	out = Datetime::normalize_fsec(fsec);
+	return true;
+}
+
+
 Datetime::clk_t
 Datetime::TimeParser(std::string_view _time)
 {

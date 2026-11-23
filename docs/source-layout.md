@@ -8,14 +8,14 @@ public header; users include it and nothing else.
 | File | Holds |
 |---|---|
 | `datetime.h` | The `Datetime` namespace API: `tm_t`, `clk_t`, `Format`, the parsers and formatters, the `DatetimeError` hierarchy. |
-| `datetime.cc` | Datetime parsing: the field readers, the ISO 8601 scanner (`iso8601_scan<Fill>`), the loose-format scanner (`scan_date_re`), `DatetimeParser` and `Iso8601Parser`, `isDate` and `isDatetime`. |
+| `datetime.cc` | Datetime parsing: the field readers, the fraction parsers (`parse_fsec`), the ISO 8601 scanner (`iso8601_scan<Fill>`), the loose-format scanner (`scan_date_re`), `DatetimeParser` and `Iso8601Parser`, `isDate` and `isDatetime`. |
 | `datetime_math.cc` | Date math: `processDateMath`, `computeTimeZone`, `computeDateMath` and the 64-bit term arithmetic (`add_term`). |
 | `datetime_calendar.cc` | Calendar arithmetic: leap years, month lengths, `normalizeMonths`, `toordinal`, `timegm`, `to_tm_t`, `timestamp`, `isValidDate`. |
 | `datetime_format.cc` | ISO 8601 formatting: the integer writer, the `std::format` fallback and the four `iso8601` overloads. |
-| `datetime_time.cc` | Time and timedelta: `TimeParser`, `TimedeltaParser`, the `clk_t` and double conversions, the `*_to_string` formatters and the predicates. |
-| `datetime_detail.h` | Internal, not for users: the civil-calendar core (`days_from_civil`, `civil_from_secs`, `apply_tz`, ...), the grammar's widths and the fraction parsers that several pieces share. |
+| `datetime_time.cc` | Time and timedelta: `parse_dotted_fsec`, `TimeParser`, `TimedeltaParser`, the `clk_t` and double conversions, the `*_to_string` formatters and the predicates. |
+| `datetime_detail.h` | Internal, not for users: the civil-calendar core (`days_from_civil`, `civil_from_secs`, `apply_tz`, ...) and the grammar's widths, which several pieces share. |
 
-The helpers in `datetime_detail.h` are `inline` functions and constants, so every piece inlines them and the program holds one copy of each. They stay at global scope, not in a `detail` namespace, because that would rename every call site.
+The helpers in `datetime_detail.h` are `inline` functions and constants, so every piece inlines them and the program holds one copy of each. They stay at global scope, not in a `detail` namespace, because that would rename every call site. The fraction parsers each serve one piece, so they stay `static` in it, as before the split.
 
 ## Tests
 
